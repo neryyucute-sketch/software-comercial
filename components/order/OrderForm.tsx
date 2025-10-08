@@ -1,0 +1,114 @@
+// components/order/OrderForm.tsx
+"use client";
+
+import { useMemo, useState } from "react";
+import type { Order, OrderItem } from "@/lib/types";
+import { OrderCustomer } from "./components/OrderCustomer";
+import { OrderItemsList } from "./components/OrderItemsList";
+import { OrderSummary } from "./components/OrderSummary";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { ProductSelectionModal } from "./modals/ProductSelectionModal";
+import { useOrders } from "@/contexts/OrdersContext";
+
+function uuidSimple(): string {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+export default function OrderForm() {
+  const { addOrder, syncOrders } = useOrders();
+
+  const [customerId, setCustomerId] = useState<string>("");
+  const [items, setItems] = useState<OrderItem[]>([]);
+  const [discount, setDiscount] = useState<number>(0);
+  const [notes, setNotes] = useState<string>("");
+
+  const [openProductModal, setOpenProductModal] = useState(false);
+
+  const itemsTotal = useMemo(() => items.reduce((acc, it) => acc + it.subtotal, 0), [items]);
+  const total = useMemo(() => Math.round(itemsTotal * (1 - Math.max(0, Math.min(100, discount)) / 100) * 100) / 100, [itemsTotal, discount]);
+
+  const onPickProducts = (newItems: OrderItem[]) => {
+    // merge por productoId si ya existe
+    const next = [...items];
+    for (const ni of newItems) {
+      const idx = next.findIndex((x) => x.productoId === ni.productoId && !x.comboId && !x.kitId);
+      if (idx >= 0) {
+        const mergedQty = next[idx].cantidad + ni.cantidad;
+        next[idx] = {
+          ...next[idx],
+          cantidad: mergedQty,
+          subtotal: Math.round(mergedQty * next[idx].precioUnitario * 100) / 100,
+        };
+      } else {
+        next.push(ni);
+      }
+    }
+    setItems(next);
+  };
+
+  const canSave = customerId && items.length > 0;
+
+  const onConfirm = async () => {
+    if (!canSave) return;
+    const localId = uuidSimple();
+    const payload: Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> = {
+      localId,
+      serverId: null,
+      customerId,
+      items,
+      discount,
+      total,
+      notes,
+      photos: [],
+      location: null,
+    };
+    await addOrder(payload);
+    // intenta sincronizar ya (si hay internet se envía; si no, queda para BG Sync)
+    await syncOrders();
+
+    // reset UI
+    setCustomerId("");
+    setItems([]);
+    setDiscount(0);
+    setNotes("");
+  };
+
+  return (
+    <Card className="p-4 space-y-4">
+      <OrderCustomer value={customerId} onChange={setCustomerId} />
+
+      <div className="flex items-center justify-between">
+        <div className="font-semibold">Productos</div>
+        <Button variant="secondary" onClick={() => setOpenProductModal(true)}>
+          Agregar producto
+        </Button>
+      </div>
+
+      <OrderItemsList items={items} onChange={setItems} />
+
+      <OrderSummary discount={discount} onDiscountChange={setDiscount} itemsTotal={itemsTotal} />
+
+      <div className="grid gap-2">
+        <textarea
+          className="border rounded-lg p-2 min-h-24"
+          placeholder="Notas del pedido (opcional)"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+      </div>
+
+      <div className="text-right">
+        <Button disabled={!canSave} onClick={onConfirm}>
+          Confirmar pedido (Q{total.toFixed(2)})
+        </Button>
+      </div>
+
+      <ProductSelectionModal
+        open={openProductModal}
+        onOpenChange={setOpenProductModal}
+        onPick={onPickProducts}
+      />
+    </Card>
+  );
+}
