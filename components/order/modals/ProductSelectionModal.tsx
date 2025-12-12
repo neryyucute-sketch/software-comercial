@@ -72,6 +72,7 @@ export default function ProductSelectionModal({
   // filtros
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLine, setSelectedLine] = useState<string | null>(null);
+  const [zoomImg, setZoomImg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -252,14 +253,14 @@ const filtered = useMemo(() => {
                     <Card
                       key={p.codigoProducto}
                       className={[
-                        "relative cursor-pointer border transition hover:shadow-md hover:-translate-y-[1px]",
+                        "relative cursor-pointer border transition-all duration-150 hover:shadow-lg hover:-translate-y-[2px]",
                         selected
-                          ? "border-green-500 bg-green-50/40 dark:bg-green-900/10"
-                          : "border-border bg-muted/30 hover:border-primary/60",
+                          ? "border-green-500 bg-green-50/60 dark:bg-green-900/20"
+                          : "border-gray-200 bg-white dark:bg-neutral-900 hover:border-primary/60",
+                        "rounded-xl"
                       ].join(" ")}
                       onClick={() => openQty(p)}
                     >
-
                       {selected && (
                         <div className="absolute top-2 right-2 bg-green-500 text-white rounded-full p-1 shadow-md">
                           <Check className="w-4 h-4" />
@@ -267,31 +268,46 @@ const filtered = useMemo(() => {
                       )}
 
                       <div className="flex gap-3 p-3">
-                        <div className="w-16 h-16 bg-muted rounded-md overflow-hidden flex items-center justify-center">
+
+                        <div className="w-28 h-28 rounded-lg overflow-hidden flex flex-col items-center justify-center shadow bg-gray-100 dark:bg-neutral-800">
                           {p.urlImg ? (
-                            // eslint-disable-next-line @next/next/no-img-element
                             <img
                               src={p.urlImg}
                               alt={p.descripcion || p.codigoProducto}
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-cover cursor-zoom-in"
+                              onClick={e => {
+                                e.stopPropagation();
+                                setZoomImg(p.urlImg || null);
+                              }}
+                              title="Ver imagen"
                             />
                           ) : (
-                            <div className="text-xs text-muted-foreground">Sin<br />imagen</div>
+                            <div className="text-xs text-muted-foreground text-center">Sin<br />imagen</div>
                           )}
                         </div>
+
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium truncate">{p.descripcion}</div>
+                          <div className="font-semibold truncate text-gray-900 dark:text-gray-100">{p.descripcion}</div>
                           <div className="text-xs text-muted-foreground truncate">
                             {p.codigoProducto}
                           </div>
                           {p.proveedor && (
-                            <div className="text-xs text-muted-foreground truncate">
-                              Prov: {p.proveedor}
-                            </div>
+                            <span className="inline-block text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100 rounded px-2 py-0.5 mt-1 mr-1">
+                              {p.proveedor}
+                            </span>
                           )}
-                          <div className="mt-1 text-sm font-semibold">Q{unit.toFixed(2)}</div>
+                          {p.filtroVenta && (
+                            <span className="inline-block text-xs  rounded px-2 py-0.5 mt-1">
+                              {p.filtroVenta}
+                            </span>
+                          )}
+                          <div className="mt-2">
+                            <span className="inline-block bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100 rounded px-2 py-0.5 text-sm font-semibold shadow">
+                              Q{unit.toFixed(2)}
+                            </span>
+                          </div>
                           {selected && (
-                            <div className="text-[18px] text-green-600 mt-1">
+                            <div className="text-[16px] text-green-700 dark:text-green-300 mt-1 font-semibold">
                               Seleccionado (cant. {alreadyQty})
                             </div>
                           )}
@@ -318,6 +334,28 @@ const filtered = useMemo(() => {
           onConfirm={handleConfirmQty}
         />
       )}
+
+{zoomImg && (
+  <Dialog open={!!zoomImg} onOpenChange={() => setZoomImg(null)}>
+    <DialogContent className="max-w-lg p-0 bg-transparent shadow-none border-none flex flex-col items-center">
+      <img
+        src={zoomImg}
+        alt="Imagen ampliada"
+        className="rounded-lg max-h-[70vh] max-w-full shadow-lg"
+        style={{ background: "#fff" }}
+      />
+      <Button
+        variant="ghost"
+        className="mt-2 text-red-600 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-900/30"
+        onClick={() => setZoomImg(null)}
+      >
+        Cerrar
+      </Button>
+    </DialogContent>
+  </Dialog>
+)}
+
+
     </>
   );
 }

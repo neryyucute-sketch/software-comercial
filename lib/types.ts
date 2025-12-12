@@ -47,6 +47,7 @@ export interface Cliente {
   direccionList ?: ClienteDireccion[];
   rutaVenta?: string;
   canalVenta?:string;
+  subCanalVenta?:string;
   updatedAt: string;          // fecha de última sync
 }
 
@@ -198,6 +199,9 @@ export type OrderItem = {
   cantidad: number;
   precioUnitario: number;
   subtotal: number;
+  subtotalSinDescuento?: number;
+  descuentoLinea?: number;
+  total?: number;
   // metadata opcional
   priceSource?: "lista" | "oferta" | "base";
   comboId?: string | null;
@@ -230,23 +234,56 @@ export interface OrderTracking {
   notes?: string
 }
 
-export type Order = {
-  id?: number; // Dexie auto-increment
-  localId: string; // UUID idempotencia
+export interface Order {
+  id: string;
+  // Identificadores locales/servidor y estado de sincronización (opcional)
+  localId?: string;
   serverId?: string | null;
-  customerId: string; // codigoCliente
+  codigoEmpresa: string;
+  codigoCliente: string;
+  nombreCliente?: string;
+  codigoVendedor: string;
+  fecha: string;
+  estado: string;
   items: OrderItem[];
-  discount?: number; // descuento global % [0..100]
-  total: number;     // total final (con descuento global aplicado)
-  createdAt: number;
-  status: OrderStatus;
-  synced: boolean;
-  attempts: number;
-  lastError?: string | null;
-  notes?: string;
-  photos?: { id: string; dataUrl: string; timestamp: number; location?: any }[];
-  location?: any;
-};
+  subtotal: number;
+  impuestos?: number;
+  total: number;
+  observaciones?: string;
+  // Metadata de sincronización
+  createdAt?: number;
+  attempts?: number;
+  synced?: boolean;
+  
+  // 🆕 Campos para ofertas
+  ofertaAplicada?: {
+    uuidOferta: string;
+    nombreOferta: string;
+    tipoOferta: string;
+    descuentoPorcentaje?: number;
+    descuentoMonto?: number;
+  };
+  descuentoTotal?: number;
+  subtotalSinDescuento?: number;
+  // Campos usados al crear/editar pedidos desde la UI
+  discount?: number; // porcentaje aplicado manualmente
+  notes?: string; // notas temporales (mapear a observaciones si se desea)
+  photos?: { id: string; dataUrl: string; timestamp: number }[];
+  location?: { lat: number; lng: number } | null;
+  ordenCompra?: string;
+  formaPago?: string;
+  bodega?: string;
+  direccionEntrega?: string;
+  departamento?: string;
+  municipio?: string;
+  nombreClienteEnvio?: string;
+  nombreVendedor?: string;
+  seriePedido?: string;
+  numeroPedido?: string;
+  numeroPedidoTemporal?: string;
+  telefonoEntrega?: string;
+  contactoEntrega?: string;
+}
 
 export interface PriceList {
   id: string
@@ -347,5 +384,36 @@ export interface Vendor {
   numero_ruta: string
   createdAt?: Date
 }
+
+export interface PriceListRow {
+  id: string;
+  name: string;
+  isActive: boolean;
+  scope?: any;
+  version?: number;
+  updatedAt: string;
+  deleted?: boolean;
+  dirty?: boolean;
+  serverId?: string;
+}
+
+export interface PriceListItemRow {
+  id?: number;
+  priceListId: string;
+  productId: string;
+  price: number;
+}
+
+export interface CatalogoGeneral {
+  id: number;
+  codigo: string;
+  tipo: string;
+  descripcion: string;
+  tipoPadre: string | null;   // 👈 antes solo string
+  codigoPadre: string | null; // 👈 antes solo string
+  codigoEmpresa: string;
+}
+
+
 
 export type ComboItem = ComboOrderItem

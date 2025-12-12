@@ -29,11 +29,16 @@ import { getAccessToken } from "./auth";
           query ? "&" : "?"
         }page=${page}&size=50`;
 
-        const res = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
+          console.debug("[syncData] Fetching:", url);
+          console.debug("[syncData] Token present:", !!token);
+
+          const res = await fetch(url, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          console.debug("[syncData] Response status:", res.status);
 
         if (!res.ok) {
           const errorText = await res.text();
@@ -42,7 +47,14 @@ import { getAccessToken } from "./auth";
           );
         }
 
-        const data = await res.json();
+        const text = await res.text();
+        let data: any;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          console.warn("[syncData] Response is not JSON:", text.slice(0, 500));
+          data = {};
+        }
 
         // asumimos que la API devuelve { content: [...], totalPages: N }
         results = results.concat(data.content ?? []);
