@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.vscode
+pnpm-debug.log
+npm-debug.log
+.env
+.env.local
+.env.development

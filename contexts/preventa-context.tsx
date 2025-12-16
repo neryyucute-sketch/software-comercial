@@ -12,8 +12,16 @@ import type {
   Vendedor,
   OrderTracking,
   OrderStatus,
+  Visita,
 } from "@/lib/types"
 import { db } from "@/lib/db"
+import {
+  createPriceListOnline,
+  updatePriceListOnline,
+  deletePriceListOnline,
+  syncPriceListsFromBackend,
+} from "@/services/pricelists.repo"
+
 
 /* ---------------------------- Helpers de soporte --------------------------- */
 
@@ -53,6 +61,33 @@ const normalizeKits = (items: Kit[]): Kit[] =>
     createdAt: asDate(k.createdAt),
   }))
 
+const normalizePriceLists = (items: PriceList[]): PriceList[] =>
+  items.map((pl) => {
+    const companyId = (pl as any).companyId || (pl as any).codigoEmpresa || "general"
+    const isBaseByName = typeof pl.name === "string" && /base/i.test(pl.name)
+    const parsedTier = Number.parseInt((pl.name.match(/(\d+)/)?.[1] ?? "").trim(), 10)
+    const tier =
+      typeof pl.tier === "number"
+        ? pl.tier
+        : Number.isFinite(parsedTier)
+          ? parsedTier
+          : isBaseByName
+            ? 0
+            : 0
+
+    const idFromStore = (pl as any).id || (pl as any).idt || generateId()
+    const name = pl.name || (pl as any).descripcion || "Lista sin nombre"
+
+    return {
+      ...pl,
+      id: idFromStore,
+      name,
+      companyId,
+      tier,
+      createdAt: asDate((pl as any).createdAt ?? new Date()),
+    }
+  })
+
 /* --------------------------------- Contexto -------------------------------- */
 
 const PreventaContext = createContext<PreventaContextType | undefined>(undefined)
@@ -61,6 +96,7 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
   const [products, setProducts] = useState<Product[]>([])
   const [customers, setCustomers] = useState<Cliente[]>([])
   const [orders, setOrders] = useState<Order[]>([])
+  const [visits, setVisits] = useState<Visita[]>([])
   const [offers, setOffers] = useState<Offer[]>([])
   const [combos, setCombos] = useState<Combo[]>([])
   const [kits, setKits] = useState<Kit[]>([])
@@ -72,7 +108,7 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
   /* ------------------------- Carga inicial desde Dexie ------------------------ */
   useEffect(() => {
     const loadData = async () => {
-      const [p, c, o, co, k, pl, v] = await Promise.all([
+      const [p, c, o, co, k, pl, v, vs] = await Promise.all([
         db.products.toArray(),
         db.clientes.toArray(),
         db.orders.toArray(),
@@ -80,6 +116,7 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
         db.kits.toArray(),
         db.priceLists.toArray(),
         db.vendedor.toArray(),
+        db.visits.toArray(),
       ])
       console.log("✅ Productos:", p.length, "Clientes:", c.length, "Pedidos:", o.length)
       setProducts(p || [])
@@ -87,8 +124,9 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
       setOrders(normalizeOrders(o || []))
       setCombos(normalizeCombos(co || []))
       setKits(normalizeKits(k || []))
-      setPriceLists(pl || [])
+      setPriceLists(normalizePriceLists(pl || []))
       setVendedor(v || [])
+      setVisits(vs || [])
     }
     loadData()
   }, [])
@@ -210,6 +248,18 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
     setCombos((prev) => prev.filter((c) => c.id !== id))
   }
 
+  /* -------------------------------- Visitas -------------------------------- */
+  const addVisit = async (visit: Omit<Visita, "id" | "createdAt">) => {
+    const nuevo: Visita = {
+      ...visit,
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+      synced: false,
+    }
+    await db.visits.add(nuevo)
+    setVisits((prev) => [...prev, nuevo])
+  }
+
   /* ----------------------------------- Kits ---------------------------------- */
   const addKit = async (kitData: Omit<Kit, "id" | "createdAt">) => {
     const newKit: Kit = { ...kitData, id: generateId(), createdAt: new Date() }
@@ -229,14 +279,44 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
 
   /* ------------------------------ Listas de Precio --------------------------- */
   const addPriceList = async (priceListData: Omit<PriceList, "id" | "createdAt">) => {
-    const newPriceList: PriceList = { ...priceListData, id: generateId(), createdAt: new Date() }
-    await db.priceLists.add(newPriceList)
-    setPriceLists((prev) => [...prev, newPriceList])
+    const shortId = Math.random().toString(36).slice(2, 10)
+    const created = await createPriceListOnline({
+      ...priceListData,
+      companyId: priceListData.companyId || "general",
+      tier: typeof priceListData.tier === "number" ? priceListData.tier : 0,
+      createdAt: new Date(),
+      id: shortId,
+    } as PriceList)
+    const normalized = normalizePriceLists([created])[0]
+    setPriceLists((prev) => [...prev, normalized])
   }
 
   const updatePriceList = async (id: string, priceListData: Partial<PriceList>) => {
-    await db.priceLists.update(id, priceListData)
-    setPriceLists((prev) => prev.map((pl) => (pl.id === id ? { ...pl, ...priceListData } : pl)))
+    const current = priceLists.find((pl) => pl.id === id)
+    if (!current) return
+
+    const payload: PriceList = {
+      ...current,
+      ...priceListData,
+      companyId: priceListData.companyId || priceListData.companyId === "" ? priceListData.companyId : current.companyId,
+    }
+
+    const updated = await updatePriceListOnline(payload)
+    const normalized = normalizePriceLists([updated])[0]
+
+    setPriceLists((prev) => prev.map((pl) => (pl.id === id ? normalized : pl)))
+  }
+
+  const deletePriceList = async (id: string) => {
+    await deletePriceListOnline(id)
+    setPriceLists((prev) => prev.filter((pl) => pl.id !== id))
+  }
+
+  const syncPriceLists = async (companyId: string) => {
+    const remote = await syncPriceListsFromBackend(companyId)
+    const normalized = normalizePriceLists(remote)
+    setPriceLists(normalized)
+    return normalized
   }
 
   /* --------------------------------- Vendedores ------------------------------ */
@@ -279,9 +359,14 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
     priceLists,
     addPriceList,
     updatePriceList,
+    deletePriceList,
+    syncPriceLists,
 
     vendedor,
     addVendedor,
+
+    visits,
+    addVisit,
   }
 
   return <PreventaContext.Provider value={value}>{children}</PreventaContext.Provider>
@@ -324,9 +409,13 @@ interface PreventaContextType {
   deleteKit: (id: string) => void
 
   priceLists: PriceList[]
-  addPriceList: (priceList: Omit<PriceList, "id" | "createdAt">) => void
-  updatePriceList: (id: string, priceList: Partial<PriceList>) => void
+  addPriceList: (priceList: Omit<PriceList, "id" | "createdAt">) => Promise<void>
+  updatePriceList: (id: string, priceList: Partial<PriceList>) => Promise<void>
+  deletePriceList: (id: string) => Promise<void>
+  syncPriceLists: (companyId: string) => Promise<PriceList[]>
 
   vendedor: Vendedor[]
   addVendedor: (vendedor: Omit<Vendedor, "idt" | "createdAt">) => void
+  visits: Visita[]
+  addVisit: (visit: Omit<Visita, "id" | "createdAt">) => Promise<void>
 }

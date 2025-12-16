@@ -14,6 +14,7 @@ import { Product, Cliente } from "@/lib/types"
 import { useAuth } from "@/contexts/AuthContext"
 import { /*syncOfertasPreventa,*/ } from "@/services/ofertas"
 import { materializeOffer } from "@/services/offers.materializer"
+import { getTokens } from "@/services/auth"
 
 interface SyncStatus {
   isOnline: boolean
@@ -62,6 +63,13 @@ export function SyncManager() {
 
   const autoSync = async () => {
     if (syncStatus.syncing) return
+
+    const tokens = await getTokens();
+    if (!tokens) {
+      console.warn("[sync-manager] sync skipped: no active session");
+      setSyncStatus((prev) => ({ ...prev, syncing: false }));
+      return;
+    }
 
     setSyncStatus((prev) => ({ ...prev, syncing: true, progress: 0 }))
 

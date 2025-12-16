@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { OfferDef } from "@/lib/types.offers";
 import type { CatalogoGeneral } from "@/lib/types";
@@ -12,10 +12,18 @@ import {
 } from "@/services/offers.repo";
 import { OfferEditorDialog } from "@/components/offers/editor/OfferEditorDialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus, Pencil, Trash2, Loader2, Tag, Calendar, Building2 } from "lucide-react";
 import { getAccessToken } from "@/services/auth";
 import { cn } from "@/lib/utils";
+
+const formatDate = (dateStr?: string) => {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("es-GT", { day: "2-digit", month: "2-digit", year: "numeric" });
+};
 
 const EMPRESAS = [
   { codigo: "TODAS", nombre: "Todas las empresas" },
@@ -61,6 +69,20 @@ export default function OffersPage() {
 
   const [catalogsLoading, setCatalogsLoading] = useState(false);
   const [catalogsError, setCatalogsError] = useState<string | null>(null);
+
+  const [busqueda, setBusqueda] = useState("");
+  const [tipoSel, setTipoSel] = useState("todos");
+  const [estadoSel, setEstadoSel] = useState("todos");
+  const [fechaDesde, setFechaDesde] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 2, now.getDate());
+    return start.toISOString().split("T")[0];
+  });
+  const [fechaHasta, setFechaHasta] = useState(() => {
+    const now = new Date();
+    return now.toISOString().split("T")[0];
+  });
+  const [modoFecha, setModoFecha] = useState<"inicio" | "fin">("inicio");
 
   useEffect(() => {
     cargarCatalogos();
@@ -232,6 +254,60 @@ async function cargarCatalogos() {
     }
   }
 
+  const ofertasFiltradas = useMemo(() => {
+    const term = busqueda.trim().toLowerCase();
+    const filtroDesde = fechaDesde ? Date.parse(fechaDesde) : null;
+    const filtroHasta = fechaHasta ? Date.parse(fechaHasta) : null;
+
+    const matchTerm = (value: string | undefined | null) => {
+      if (!term) return true;
+      return (value ?? "").toString().toLowerCase().includes(term);
+    };
+
+    const matchArray = (arr: string[] | undefined) => {
+      if (!term) return true;
+      if (!arr || arr.length === 0) return false;
+      return arr.some((code) => (code ?? "").toString().toLowerCase().includes(term));
+    };
+
+    return ofertas.filter((o) => {
+      const tipoLabel = TIPO_LABELS[o.type] || o.type;
+      const estadoLabel = o.status === "draft" ? "borrador" : o.status === "active" ? "activa" : o.status === "inactive" ? "inactiva" : o.status;
+
+      if (term) {
+        const hits = [
+          matchTerm(o.name),
+          matchTerm(o.description),
+          matchArray(o.products || o.scope?.codigosProducto),
+          matchArray(o.scope?.codigosCliente),
+          matchArray(o.proveedores || o.scope?.codigosProveedor),
+          matchArray(o.scope?.codigosLinea || o.lineas || o.familias || []),
+          matchArray(o.scope?.canales),
+          matchArray(o.scope?.subCanales),
+          matchTerm(tipoLabel),
+          matchTerm(estadoLabel),
+        ];
+        if (!hits.some(Boolean)) return false;
+      }
+
+      if (tipoSel !== "todos" && o.type !== tipoSel) return false;
+      if (estadoSel !== "todos" && o.status !== estadoSel) return false;
+
+      const vigenciaDesde = Date.parse(o.dates.validFrom ?? "");
+      const vigenciaHasta = Date.parse(o.dates.validTo ?? "");
+
+      if (modoFecha === "inicio") {
+        if (filtroDesde !== null && !Number.isNaN(vigenciaDesde) && vigenciaDesde < filtroDesde) return false;
+        if (filtroHasta !== null && !Number.isNaN(vigenciaDesde) && vigenciaDesde > filtroHasta) return false;
+      } else if (modoFecha === "fin") {
+        if (filtroDesde !== null && !Number.isNaN(vigenciaHasta) && vigenciaHasta < filtroDesde) return false;
+        if (filtroHasta !== null && !Number.isNaN(vigenciaHasta) && vigenciaHasta > filtroHasta) return false;
+      }
+
+      return true;
+    });
+  }, [ofertas, busqueda, fechaDesde, fechaHasta, tipoSel, estadoSel, modoFecha]);
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -262,18 +338,109 @@ async function cargarCatalogos() {
         </Select>
       </div>
 
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-center">
+          <div className="lg:col-span-2">
+            <Input
+              placeholder="Buscar por nombre, descripción, producto, cliente, proveedor, línea, canal o subcanal"
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              type="date"
+              value={fechaDesde}
+              onChange={(e) => setFechaDesde(e.target.value)}
+              placeholder="Desde"
+            />
+            <Input
+              type="date"
+              value={fechaHasta}
+              onChange={(e) => setFechaHasta(e.target.value)}
+              placeholder="Hasta"
+            />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-4 text-sm text-slate-700">
+          <span className="font-medium text-slate-800">Modo de fecha:</span>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="modo-fecha"
+              checked={modoFecha === "inicio"}
+              onChange={() => setModoFecha("inicio")}
+              className="h-4 w-4 border-slate-300 text-emerald-600 focus:ring-emerald-500"
+            />
+            Filtrar por fecha de inicio
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="modo-fecha"
+              checked={modoFecha === "fin"}
+              onChange={() => setModoFecha("fin")}
+              className="h-4 w-4 border-slate-300 text-emerald-600 focus:ring-emerald-500"
+            />
+            Filtrar por fecha de finalización
+          </label>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-center">
+          <Select value={tipoSel} onValueChange={setTipoSel}>
+            <SelectTrigger>
+              <SelectValue placeholder="Tipo" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todos">Todos los tipos</SelectItem>
+              {Object.entries(TIPO_LABELS).map(([key, label]) => (
+                <SelectItem key={key} value={key}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={estadoSel} onValueChange={setEstadoSel}>
+            <SelectTrigger>
+              <SelectValue placeholder="Estado" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todos">Todos los estados</SelectItem>
+              <SelectItem value="draft">Borrador</SelectItem>
+              <SelectItem value="active">Activa</SelectItem>
+              <SelectItem value="inactive">Inactiva</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setBusqueda("");
+              setTipoSel("todos");
+              setEstadoSel("todos");
+              setFechaDesde("");
+              setFechaHasta("");
+              setModoFecha("inicio");
+            }}
+          >
+            Limpiar
+          </Button>
+        </div>
+      </div>
+
       {loading ? (
         <div className="flex justify-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {ofertas.length === 0 ? (
+          {ofertasFiltradas.length === 0 ? (
             <div className="col-span-full text-center py-12 text-slate-500">
               No hay ofertas creadas
             </div>
           ) : (
-            ofertas.map((oferta) => {
+            ofertasFiltradas.map((oferta) => {
               const statusStyle = STATUS_COLORS[oferta.status] || STATUS_COLORS.draft;
               const empresaNombre = EMPRESAS.find(e => e.codigo === oferta.codigoEmpresa)?.nombre || oferta.codigoEmpresa;
 
@@ -349,7 +516,7 @@ async function cargarCatalogos() {
                       <div className="flex items-center gap-2 text-xs text-slate-600">
                         <Calendar className="h-3.5 w-3.5" />
                         <span>
-                          {oferta.dates.validFrom} → {oferta.dates.validTo}
+                          {formatDate(oferta.dates.validFrom)} → {formatDate(oferta.dates.validTo)}
                         </span>
                       </div>
                     </div>

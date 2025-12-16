@@ -1,5 +1,5 @@
 import Dexie, { Table } from "dexie";
-import type { Product, VendedorRestriccion, AuthUser, DeviceCache, Cliente, Tokens, Order, Combo, Kit, PriceList, Vendedor, Offer, PriceListRow, PriceListItemRow } from "./types";
+import type { Product, VendedorRestriccion, AuthUser, DeviceCache, Cliente, Tokens, Order, Combo, Kit, PriceList, Vendedor, Offer, PriceListRow, PriceListItemRow, Visita } from "./types";
 import { encryptData, decryptData } from "./crypto-utils";
 import type { OfferDef } from "./types.offers";
 
@@ -46,12 +46,13 @@ export class PreventaDB extends Dexie {
   price_lists!: Table<PriceListRow, string>;
   price_list_items!: Table<PriceListItemRow, number>;
   catalogos!: Table<{ id: string; tipo: string; codigo: string; descripcion: string; codigoPadre: string }, string>;
+  visits!: Table<Visita, string>;
   
   constructor() {
     super("preventa_offline");
 
     // ⚡️ Esquema de IndexedDB
-    this.version(8).stores({
+    this.version(9).stores({
       products:
         "codigoProducto, descripcion, codigoProveedor, proveedor, codigoFamilia, familia, codigoSubfamilia, subfamilia, codigoFiltroVenta, filtroVenta, urlImg",
       clientes: "idt, codigoCliente, nombre, nit, telefono, correo, updatedAt",
@@ -70,7 +71,8 @@ export class PreventaDB extends Dexie {
       offers:"idt,descripcion",
       offer_defs: "id, type, status, updatedAt, deleted, dirty",
       offer_targets: "++id, offerId, productId, type, status",
-      pack_items: "++id, offerId, productId"      
+      pack_items: "++id, offerId, productId",
+      visits: "id, clienteId, clienteCodigo, fecha, motivo, createdAt"
     });
   }
 }

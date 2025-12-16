@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useOrders } from "@/contexts/OrdersContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,9 +15,12 @@ import OrderPdf from "@/components/order/OrderPdf";
 
 export default function OrdersPage() {
   const { orders, syncing, syncOrders } = useOrders();
+  const searchParams = useSearchParams();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<any>(null);
   const [viewing, setViewing] = useState<Order | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<any>(null);
+  const [showDraftModal, setShowDraftModal] = useState(false);
   const todayISO = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const defaultFromISO = useMemo(() => {
     const d = new Date();
@@ -35,15 +39,9 @@ export default function OrdersPage() {
     if (draftStr) {
       const data = JSON.parse(draftStr);
       if (data.customer || (Array.isArray(data.items) && data.items.length > 0)) {
-        const ok = window.confirm("Tienes un pedido pendiente. ¿Deseas continuar?");
-        if (ok) {
-          console.log("Cargando draft", data);
-          setDraft(data);
-          setOpen(true);
-          return;
-        } else {
-          localStorage.removeItem("pedido_draft");
-        }
+        setPendingDraft(data);
+        setShowDraftModal(true);
+        return;
       } else {
         localStorage.removeItem("pedido_draft");
       }
@@ -51,6 +49,35 @@ export default function OrdersPage() {
     setDraft(null);
     setOpen(true);
   };
+
+  const continueDraft = () => {
+    if (pendingDraft) {
+      setDraft(pendingDraft);
+      setOpen(true);
+    }
+    setPendingDraft(null);
+    setShowDraftModal(false);
+  };
+
+  const discardDraft = () => {
+    localStorage.removeItem("pedido_draft");
+    setPendingDraft(null);
+    setShowDraftModal(false);
+    setDraft(null);
+    setOpen(true);
+  };
+
+  // Abrir modal con cliente preseleccionado si viene por query string
+  useEffect(() => {
+    const customerId = searchParams.get("customerId");
+    const customerName = searchParams.get("customerName");
+    const nit = searchParams.get("nit");
+    if (customerId || customerName) {
+      setDraft({ customer: { codigoCliente: customerId || "", nombreCliente: customerName || customerId || "", nit } });
+      setOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const formatDate = useMemo(() => (iso?: string | number) => {
     if (!iso) return "";
@@ -131,6 +158,19 @@ export default function OrdersPage() {
       );
     });
   }, [orders, searchTerm, fromDate, toDate]);
+
+  const draftSummary = useMemo(() => {
+    if (!pendingDraft) return { cliente: "", items: 0, total: 0 };
+    const itemsCount = Array.isArray(pendingDraft.items) ? pendingDraft.items.length : 0;
+    const total = Array.isArray(pendingDraft.items)
+      ? pendingDraft.items.reduce((acc: number, it: any) => acc + (Number(it.subtotal) || Number(it.total) || Number(it.cantidad * it.precioUnitario) || 0), 0)
+      : 0;
+    return {
+      cliente: pendingDraft.customer?.nombreCliente || pendingDraft.customer?.codigoCliente || "Cliente pendiente",
+      items: itemsCount,
+      total,
+    };
+  }, [pendingDraft]);
 
   const sortedOrders = useMemo(() => {
     const arr = [...filteredOrders];
@@ -354,6 +394,45 @@ export default function OrdersPage() {
       </div>
 
       <OrderModal open={open} onOpenChange={setOpen} draft={draft} />
+
+      <Dialog open={showDraftModal} onOpenChange={setShowDraftModal}>
+        <DialogContent className="sm:max-w-lg p-0 overflow-hidden">
+          <div className="px-5 pt-5 pb-3">
+            <DialogHeader>
+              <DialogTitle className="text-base font-semibold text-slate-900">Tienes un pedido pendiente</DialogTitle>
+              <DialogDescription className="text-sm text-slate-600">
+                Continúa donde lo dejaste o empieza uno nuevo y descarta el borrador actual.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="mt-4 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
+              <div className="font-medium text-slate-900">{draftSummary.cliente}</div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 mt-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                  {draftSummary.items} productos
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+                  Total estimado: Q{draftSummary.total.toFixed(2)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end sm:gap-3">
+              <Button variant="secondary" onClick={() => setShowDraftModal(false)} className="w-full sm:w-auto">
+                Cancelar
+              </Button>
+              <Button variant="outline" onClick={discardDraft} className="w-full sm:w-auto border-red-200 text-red-700 hover:bg-red-50">
+                Descartar y empezar nuevo
+              </Button>
+              <Button onClick={continueDraft} className="w-full sm:w-auto bg-blue-600 text-white hover:bg-blue-700 shadow">
+                Continuar borrador
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!viewing} onOpenChange={(v) => { if (!v) setViewing(null); }}>
         <DialogContent className="max-w-3xl">

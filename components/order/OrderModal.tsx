@@ -19,7 +19,7 @@ export default function OrderModal({
         onInteractOutside={(e: any) => e.preventDefault()}
         className="
           max-w-5xl w-[96vw]
-          p-0 overflow-hidden
+          p-0
           max-h-[90dvh] md:max-h-[85vh] lg:max-h-[80vh]
         "
       >

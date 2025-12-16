@@ -1,4 +1,4 @@
-import type { OfferDef } from "./types.offers";
+import type { OfferDef, DiscountTier, BonusConfig, BonusTargetType } from "./types.offers";
 import type { Order, OrderItem, Cliente, Product } from "./types";
 
 /**
@@ -10,7 +10,30 @@ export interface ApplicableOffer {
   offer: OfferDef;
   applicableItems: OrderItem[];
   potentialDiscount: number;
+  potentialBonusQty?: number;
+  bonusApplications?: BonusApplication[];
 }
+
+export type BonusApplication = {
+  mode: "acumulado" | "por_linea";
+  bonusQty: number;
+  targetType: BonusTargetType;
+  resolvedProductId?: string;
+  requiresSelection?: boolean;
+  sourceItemIds: Array<string | number>;
+};
+
+const normalizeBool = (val: any, defaultValue = false): boolean => {
+  if (val === undefined || val === null) return defaultValue;
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'number') return val === 1;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'si', 'sí', 'y'].includes(s)) return true;
+    if (['0', 'false', 'no', 'n'].includes(s)) return false;
+  }
+  return defaultValue;
+};
 
 const normalizeStackable = (val: any): boolean => {
   if (val === undefined || val === null) return true; // default permisivo para ofertas antiguas sin campo
@@ -23,6 +46,44 @@ const normalizeStackable = (val: any): boolean => {
   }
   if (typeof val === 'number') return val === 1;
   return true;
+};
+
+const getPercent = (discountConfig: any): number | undefined => {
+  if (discountConfig?.type === 'percentage' && discountConfig?.value !== undefined) return Number(discountConfig.value);
+  if (discountConfig?.percent !== undefined) return Number(discountConfig.percent);
+  if (discountConfig?.value !== undefined && discountConfig?.type === 'percentage') return Number(discountConfig.value);
+  return undefined as unknown as number;
+};
+
+const getFixed = (discountConfig: any): number | undefined => {
+  if (discountConfig?.type === 'fixed' && discountConfig?.value !== undefined) return Number(discountConfig.value);
+  if (discountConfig?.amount !== undefined) return Number(discountConfig.amount);
+  return undefined as unknown as number;
+};
+
+const parseTiers = (discountConfig: any): DiscountTier[] => {
+  const tiersRaw = discountConfig?.tiers;
+  if (!Array.isArray(tiersRaw)) return [];
+  const mapped = tiersRaw
+    .map((t: any) => ({
+      from: t?.from !== undefined && t?.from !== null ? Number(t.from) : undefined,
+      to: t?.to !== undefined && t?.to !== null ? Number(t.to) : undefined,
+      percent: t?.percent !== undefined ? Number(t.percent) : undefined,
+      amount: t?.amount !== undefined ? Number(t.amount) : undefined,
+    }))
+    .filter((t: DiscountTier) => t.percent !== undefined || t.amount !== undefined);
+
+  return mapped.sort((a: DiscountTier, b: DiscountTier) => (a.from ?? 0) - (b.from ?? 0));
+};
+
+const pickTierForQty = (tiers: DiscountTier[], qty: number): DiscountTier | undefined => {
+  const q = Number(qty) || 0;
+  for (const tier of tiers) {
+    const fromOk = tier.from === undefined || q >= tier.from;
+    const toOk = tier.to === undefined || q <= tier.to;
+    if (fromOk && toOk) return tier;
+  }
+  return undefined;
 };
 
 /**
@@ -136,14 +197,40 @@ export function getApplicableOffers(
       continue;
     }
 
-    const potentialDiscount = calculateDiscount(offerToUse, applicableItems);
+    if (offerToUse.type === 'discount') {
+      const potentialDiscount = calculateDiscount(offerToUse, applicableItems);
 
-    console.log(`[offers-engine] applicable ${offerToUse.id} -> discount:${potentialDiscount}`, { offer: offerToUse, applicableItems });
-    applicableOffers.push({
-      offer: offerToUse,
-      applicableItems,
-      potentialDiscount,
-    });
+      if (!potentialDiscount || potentialDiscount <= 0) {
+        console.log(`[offers-engine] skipping ${offerToUse.id} - discount=0 (no escala cumple)`, { offer: offerToUse, applicableItems });
+        continue;
+      }
+
+      console.log(`[offers-engine] applicable ${offerToUse.id} -> discount:${potentialDiscount}`, { offer: offerToUse, applicableItems });
+      applicableOffers.push({
+        offer: offerToUse,
+        applicableItems,
+        potentialDiscount,
+      });
+      continue;
+    }
+
+    if (offerToUse.type === 'bonus') {
+      const { totalBonusQty, applications } = calculateBonus(offerToUse, applicableItems, productos);
+      if (!totalBonusQty || totalBonusQty <= 0) {
+        console.log(`[offers-engine] skipping ${offerToUse.id} - bonus=0 (no aplica)`, { offer: offerToUse, applicableItems });
+        continue;
+      }
+
+      console.log(`[offers-engine] applicable ${offerToUse.id} -> bonusQty:${totalBonusQty}`, { offer: offerToUse, applications });
+      applicableOffers.push({
+        offer: offerToUse,
+        applicableItems,
+        potentialDiscount: 0,
+        potentialBonusQty: totalBonusQty,
+        bonusApplications: applications,
+      });
+      continue;
+    }
   }
 
   return applicableOffers;
@@ -417,39 +504,62 @@ function calculateDiscount(offer: OfferDef, applicableItems: OrderItem[]): numbe
   const discountConfig = offer.discount || (offer as any).discountConfig;
   if (!discountConfig) return 0;
 
-  // soportar varias formas: { type:'percentage', value:10 } o { percent:10 } o { amount:5 }
-  const getPercent = () => {
-    if ((discountConfig as any).type === 'percentage' && (discountConfig as any).value !== undefined) return Number((discountConfig as any).value);
-    if ((discountConfig as any).percent !== undefined) return Number((discountConfig as any).percent);
-    if ((discountConfig as any).value !== undefined && (discountConfig as any).type === 'percentage') return Number((discountConfig as any).value);
-    return undefined as unknown as number;
-  };
+  const applyPerLineConfig = normalizeBool((discountConfig as any).perLine ?? (discountConfig as any).byLine ?? (discountConfig as any).applyPerLine ?? (discountConfig as any).aplicarPorLinea ?? (discountConfig as any).porLinea, false);
 
-  const getFixed = () => {
-    if ((discountConfig as any).type === 'fixed' && (discountConfig as any).value !== undefined) return Number((discountConfig as any).value);
-    if ((discountConfig as any).amount !== undefined) return Number((discountConfig as any).amount);
-    return undefined as unknown as number;
-  };
+  const pctBase = getPercent(discountConfig);
+  const fixedBase = getFixed(discountConfig);
+  const tiers = parseTiers(discountConfig);
+  const applyPerLine = tiers.length > 0 ? true : applyPerLineConfig;
 
-  const pct = getPercent();
-  const fixed = getFixed();
+  // Evaluar por línea
+  if (applyPerLine) {
+    let totalDiscount = 0;
+    for (const item of applicableItems) {
+      const qty = Number(item.cantidad || 0);
+      const lineAmount = qty * item.precioUnitario;
+      const tier = pickTierForQty(tiers, qty);
+      if (tiers.length > 0 && !tier) continue; // no escala alcanzada
+      const pct = tier?.percent ?? pctBase;
+      const fixed = tier?.amount ?? fixedBase;
+      if (pct === undefined && fixed === undefined) continue;
+
+      const lineDisc = (pct !== undefined && !isNaN(pct) ? (lineAmount * pct) / 100 : 0) + (fixed !== undefined && !isNaN(fixed) ? fixed * qty : 0);
+      totalDiscount += lineDisc;
+
+      console.debug('[offers-engine] discount calc per-line', {
+        offer: offer.id || offer.serverId,
+        itemId: item.id,
+        productoId: item.productoId,
+        qty,
+        fixed,
+        lineDisc,
+        runningDiscount: totalDiscount,
+      });
+    }
+    return totalDiscount;
+  }
+
+  // Evaluar por mezcla (sumar cantidades)
+  const totalQty = applicableItems.reduce((acc, it) => acc + Number(it.cantidad || 0), 0);
+  const tier = pickTierForQty(tiers, totalQty);
+  if (tiers.length > 0 && !tier) return 0; // no escala alcanzada
+  const pct = tier?.percent ?? pctBase;
+  const fixed = tier?.amount ?? fixedBase;
+  if (pct === undefined && fixed === undefined) return 0;
 
   let totalDiscount = 0;
   for (const item of applicableItems) {
     const subtotal = item.cantidad * item.precioUnitario;
-    if (pct !== undefined && !isNaN(pct)) {
-      totalDiscount += (subtotal * pct) / 100;
-    } else if (fixed !== undefined && !isNaN(fixed)) {
-      totalDiscount += fixed * item.cantidad;
-    }
+    const lineDisc = (pct !== undefined && !isNaN(pct) ? (subtotal * pct) / 100 : 0) + (fixed !== undefined && !isNaN(fixed) ? fixed * item.cantidad : 0);
+    totalDiscount += lineDisc;
 
-    console.debug('[offers-engine] discount calc', {
+    console.debug('[offers-engine] discount calc mix', {
       offer: offer.id || offer.serverId,
-      itemId: item.id,
-      productoId: item.productoId,
       subtotal,
+      totalQty,
       pct,
       fixed,
+      lineDisc,
       runningDiscount: totalDiscount,
     });
   }
@@ -515,47 +625,105 @@ export function applyOfferToItems(
   const { offer, applicableItems } = applicableOffer;
 
   const discountConfig = offer.discount || (offer as any).discountConfig;
-  const pct = (() => {
-    if ((discountConfig as any)?.type === 'percentage' && (discountConfig as any).value !== undefined) return Number((discountConfig as any).value);
-    if ((discountConfig as any)?.percent !== undefined) return Number((discountConfig as any).percent);
-    return undefined as unknown as number;
-  })();
-
-  const fixed = (() => {
-    if ((discountConfig as any)?.type === 'fixed' && (discountConfig as any).value !== undefined) return Number((discountConfig as any).value);
-    if ((discountConfig as any)?.amount !== undefined) return Number((discountConfig as any).amount);
-    return undefined as unknown as number;
-  })();
+  const applyPerLineConfig = normalizeBool((discountConfig as any)?.perLine ?? (discountConfig as any)?.byLine ?? (discountConfig as any)?.applyPerLine ?? (discountConfig as any)?.aplicarPorLinea ?? (discountConfig as any)?.porLinea, false);
+  const pctBase = getPercent(discountConfig);
+  const fixedBase = getFixed(discountConfig);
+  const tiers = parseTiers(discountConfig);
+  const applyPerLine = tiers.length > 0 ? true : applyPerLineConfig;
+  const applicableSet = new Set((applicableItems || []).map((ai) => ai.id ?? ai.productoId));
+  const hasExplicitApplicables = (applicableItems || []).length > 0;
 
   let totalDiscount = 0;
   const updated = orderItems.map((item) => {
     const bruto = item.subtotalSinDescuento ?? item.subtotal ?? (item.cantidad * item.precioUnitario);
-    const isApplicable = applicableItems.some((ai) => ai.id === item.id || ai.productoId === item.productoId);
+    const isApplicable = !hasExplicitApplicables || applicableSet.has(item.id) || applicableSet.has(item.productoId);
     if (!isApplicable) {
       return {
         ...item,
+        subtotalSinDescuento: bruto,
         subtotal: bruto,
         total: bruto,
       };
     }
 
-    let lineDisc = 0;
-    if (pct !== undefined && !isNaN(pct)) {
-      lineDisc = (bruto * pct) / 100;
-    } else if (fixed !== undefined && !isNaN(fixed)) {
-      lineDisc = fixed * item.cantidad;
+    const qty = Number(item.cantidad || 0);
+    const lineAmount = qty * item.precioUnitario;
+
+    if (applyPerLine) {
+      const tier = pickTierForQty(tiers, qty);
+      if (tiers.length > 0 && !tier) {
+        return { ...item, subtotalSinDescuento: bruto, subtotal: bruto, total: bruto };
+      }
+      const pct = tier?.percent ?? pctBase;
+      const fixed = tier?.amount ?? fixedBase;
+      if (pct === undefined && fixed === undefined) {
+        return { ...item, subtotalSinDescuento: bruto, subtotal: bruto, total: bruto };
+      }
+
+      const lineDisc = (pct !== undefined && !isNaN(pct) ? (bruto * pct) / 100 : 0) + (fixed !== undefined && !isNaN(fixed) ? fixed * qty : 0);
+      totalDiscount += lineDisc;
+      const neto = Math.max(0, bruto - lineDisc);
+      return {
+        ...item,
+        subtotalSinDescuento: bruto,
+        descuentoLinea: lineDisc,
+        subtotal: neto,
+        total: neto,
+      };
     }
 
-    totalDiscount += lineDisc;
-    const neto = Math.max(0, bruto - lineDisc);
-    return {
-      ...item,
-      subtotalSinDescuento: bruto,
-      descuentoLinea: lineDisc,
-      subtotal: neto,
-      total: neto,
-    };
+    // Evaluación por mezcla: aplicamos un único tier a todos los ítems aplicables
+    return item; // placeholder, replaced below
   });
+
+  // Mezcla: necesitamos aplicar después de conocer el tier global
+  if (!applyPerLine) {
+    const applicableOrderItems = hasExplicitApplicables ? orderItems.filter((item) => applicableSet.has(item.id) || applicableSet.has(item.productoId)) : orderItems;
+    const totalQty = applicableOrderItems.reduce((acc, it) => acc + Number(it.cantidad || 0), 0);
+
+    const tier = pickTierForQty(tiers, totalQty);
+    if (tiers.length > 0 && !tier) {
+      const untouched = orderItems.map((item) => {
+        const bruto = item.subtotalSinDescuento ?? item.subtotal ?? (item.cantidad * item.precioUnitario);
+        return { ...item, subtotalSinDescuento: bruto, subtotal: bruto, total: bruto };
+      });
+      const brutoTotal = untouched.reduce((acc, it) => acc + (it.subtotalSinDescuento ?? it.subtotal ?? 0), 0);
+      return { items: untouched, totalDiscount: 0, bruto: brutoTotal };
+    }
+    const pct = tier?.percent ?? pctBase;
+    const fixed = tier?.amount ?? fixedBase;
+    if (pct === undefined && fixed === undefined) {
+      const untouched = orderItems.map((item) => {
+        const bruto = item.subtotalSinDescuento ?? item.subtotal ?? (item.cantidad * item.precioUnitario);
+        return { ...item, subtotalSinDescuento: bruto, subtotal: bruto, total: bruto };
+      });
+      const brutoTotal = untouched.reduce((acc, it) => acc + (it.subtotalSinDescuento ?? it.subtotal ?? 0), 0);
+      return { items: untouched, totalDiscount: 0, bruto: brutoTotal };
+    }
+
+    totalDiscount = 0;
+    const updatedMix = orderItems.map((item) => {
+      const bruto = item.subtotalSinDescuento ?? item.subtotal ?? (item.cantidad * item.precioUnitario);
+      const isApplicable = applicableSet.has(item.id) || applicableSet.has(item.productoId);
+      if (!isApplicable) {
+        return { ...item, subtotalSinDescuento: bruto, subtotal: bruto, total: bruto };
+      }
+
+      const lineDisc = (pct !== undefined && !isNaN(pct) ? (bruto * pct) / 100 : 0) + (fixed !== undefined && !isNaN(fixed) ? fixed * item.cantidad : 0);
+      totalDiscount += lineDisc;
+      const neto = Math.max(0, bruto - lineDisc);
+      return {
+        ...item,
+        subtotalSinDescuento: bruto,
+        descuentoLinea: lineDisc,
+        subtotal: neto,
+        total: neto,
+      };
+    });
+
+    const brutoMix = updatedMix.reduce((acc, it) => acc + (it.subtotalSinDescuento ?? it.subtotal ?? 0), 0);
+    return { items: updatedMix, totalDiscount, bruto: brutoMix };
+  }
 
   const bruto = updated.reduce((acc, it) => acc + (it.subtotalSinDescuento ?? it.subtotal ?? 0), 0);
 
@@ -618,4 +786,110 @@ try {
   }
 } catch (e) {
   // noop
+}
+
+function calculateBonus(offer: OfferDef, applicableItems: OrderItem[], productos: Product[]): { totalBonusQty: number; applications: BonusApplication[] } {
+  if (offer.type !== 'bonus') return { totalBonusQty: 0, applications: [] };
+
+  const bonusConfig: BonusConfig | undefined = (offer as any).bonus || (offer as any).bonusConfig || offer.bonus;
+  if (!bonusConfig) return { totalBonusQty: 0, applications: [] };
+
+  const everyN = Number(bonusConfig.everyN ?? bonusConfig.buyQty ?? 0);
+  const givesM = Number(bonusConfig.givesM ?? bonusConfig.bonusQty ?? 0);
+  if (!everyN || everyN <= 0 || !givesM || givesM <= 0) return { totalBonusQty: 0, applications: [] };
+
+  const mode: "acumulado" | "por_linea" = bonusConfig.mode === 'por_linea' ? 'por_linea' : 'acumulado';
+  const maxApps = bonusConfig.maxApplications ?? undefined;
+
+  const targetType: BonusTargetType = bonusConfig.target?.type
+    ?? (bonusConfig.sameAsQualifier ? 'same' : bonusConfig.target?.productId ? 'sku' : 'same');
+
+  const resolveProduct = (sourceItem?: OrderItem): { productId?: string; requiresSelection?: boolean } => {
+    if (targetType === 'same') {
+      return { productId: sourceItem?.productoId, requiresSelection: false };
+    }
+    if (targetType === 'sku') {
+      return { productId: bonusConfig.target?.productId, requiresSelection: !bonusConfig.target?.productId };
+    }
+
+    const requiresSelection = !!bonusConfig.target?.requiereSeleccionUsuario;
+    const lineaIds = (bonusConfig.target as any)?.lineaIds as string[] | undefined;
+    const familiaIds = (bonusConfig.target as any)?.familiaIds as string[] | undefined;
+    const lineaId = bonusConfig.target?.lineaId;
+    const familiaId = bonusConfig.target?.familiaId;
+
+    // Si se exige selección de usuario en línea/familia, no resolvemos automáticamente
+    if (requiresSelection) {
+      return { productId: undefined, requiresSelection: true };
+    }
+
+    const lineasSet = new Set<string>();
+    (lineaIds || []).forEach((v) => lineasSet.add(String(v)));
+    if (lineaId) lineasSet.add(String(lineaId));
+
+    const familiasSet = new Set<string>();
+    (familiaIds || []).forEach((v) => familiasSet.add(String(v)));
+    if (familiaId) familiasSet.add(String(familiaId));
+
+    const candidate = productos.find((p) => {
+      const lineaVal = String(p.codigoLinea ?? p.codigoFiltroVenta ?? p.lineaVenta ?? '');
+      const famVal = String(p.codigoFamilia ?? p.familia ?? '');
+      const lineaMatch = lineasSet.size ? Array.from(lineasSet).some((id) => lineaVal === id || lineaVal.includes(id)) : false;
+      const famMatch = familiasSet.size ? Array.from(familiasSet).some((id) => famVal === id || famVal.includes(id)) : false;
+      return lineaMatch || famMatch;
+    });
+    if (candidate) {
+      return { productId: candidate.codigoProducto, requiresSelection: false };
+    }
+    // Fallback: usa el mismo producto que calificó si no hay candidato y no se exige selección manual
+    if (sourceItem && !requiresSelection) {
+      return { productId: sourceItem.productoId, requiresSelection: false };
+    }
+    return { productId: undefined, requiresSelection: true };
+  };
+
+  const applications: BonusApplication[] = [];
+
+  if (mode === 'por_linea') {
+    let remainingApps = maxApps ?? Number.POSITIVE_INFINITY;
+    for (const item of applicableItems) {
+      if (remainingApps <= 0) break;
+      const qty = Number(item.cantidad || 0);
+      const appsForLine = Math.floor(qty / everyN);
+      if (appsForLine <= 0) continue;
+      const cappedApps = Math.min(appsForLine, remainingApps);
+      const bonusQty = cappedApps * givesM;
+      const { productId, requiresSelection } = resolveProduct(item);
+      applications.push({
+        mode,
+        bonusQty,
+        targetType,
+        resolvedProductId: productId,
+        requiresSelection,
+        sourceItemIds: [item.id ?? item.productoId],
+      });
+      if (maxApps !== undefined) {
+        remainingApps -= cappedApps;
+      }
+    }
+  } else {
+    const totalQty = applicableItems.reduce((acc, it) => acc + Number(it.cantidad || 0), 0);
+    const totalApps = Math.floor(totalQty / everyN);
+    const cappedApps = maxApps !== undefined ? Math.min(totalApps, maxApps) : totalApps;
+    const bonusQty = cappedApps * givesM;
+    if (bonusQty > 0) {
+      const { productId, requiresSelection } = resolveProduct(applicableItems[0]);
+      applications.push({
+        mode,
+        bonusQty,
+        targetType,
+        resolvedProductId: productId,
+        requiresSelection,
+        sourceItemIds: applicableItems.map((it) => it.id ?? it.productoId),
+      });
+    }
+  }
+
+  const totalBonusQty = applications.reduce((acc, a) => acc + a.bonusQty, 0);
+  return { totalBonusQty, applications };
 }

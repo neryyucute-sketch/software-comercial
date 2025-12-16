@@ -249,6 +249,12 @@ export function OfferTabClients({
     if (actuales.includes(codigo)) {
       return;
     }
+
+    setClientesMap((prev) => {
+      const next = new Map(prev);
+      next.set(codigo, cliente);
+      return next;
+    });
   
     update((d) => ({
       ...d,
@@ -258,6 +264,62 @@ export function OfferTabClients({
       },
     }));
   };
+
+  useEffect(() => {
+    if (clientesRemote.length === 0) return;
+    setClientesMap((prev) => {
+      const next = new Map(prev);
+      clientesRemote.forEach((c: any) => {
+        const code = c.codigoCliente ?? c.codigo;
+        if (!next.has(code)) next.set(code, c);
+      });
+      return next;
+    });
+  }, [clientesRemote]);
+
+  useEffect(() => {
+    const faltantes = (draft.scope?.codigosCliente ?? []).filter((code) => !clientesMap.has(code));
+    if (faltantes.length === 0) return;
+
+    const controller = new AbortController();
+
+    const fetchMissing = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10931/preventa/api/v1";
+        const token = await getAccessToken();
+        const headers: HeadersInit = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        };
+        const codigoEmpresa = draft.codigoEmpresa || "E01";
+
+        const requests = faltantes.map(async (code) => {
+          const url = `${API_BASE}/catalogo-clientes?codigoEmpresa=${encodeURIComponent(codigoEmpresa)}&q=${encodeURIComponent(code)}&page=0&size=1`;
+          const res = await fetch(url, { headers, signal: controller.signal });
+          if (!res.ok) return null;
+          const data = await res.json();
+          const item = data.content?.[0];
+          if (!item) return null;
+          const codigo = item.codigoCliente ?? item.codigo;
+          return codigo ? { codigo, item } : null;
+        });
+
+        const resolved = await Promise.all(requests);
+        setClientesMap((prev) => {
+          const next = new Map(prev);
+          resolved.forEach((entry) => {
+            if (entry) next.set(entry.codigo, entry.item);
+          });
+          return next;
+        });
+      } catch (err: any) {
+        if (err.name === "AbortError") return;
+      }
+    };
+
+    fetchMissing();
+    return () => controller.abort();
+  }, [draft.scope?.codigosCliente, clientesMap, draft.codigoEmpresa]);
 
   // =========================================================
   //  CRITERIO: CANAL DE VENTA
@@ -410,7 +472,7 @@ export function OfferTabClients({
                 
                 return (
                   <div
-                    key={c.idt ?? c.id ?? codigo}
+                    key={codigo}
                     className={cn(
                       "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
                       yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"
@@ -554,7 +616,7 @@ export function OfferTabClients({
                 
                 return (
                   <div
-                    key={c.id}
+                    key={c.codigo}
                     className={cn(
                       "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
                       yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"
@@ -659,7 +721,7 @@ export function OfferTabClients({
                 
                 return (
                   <div
-                    key={sc.id}
+                    key={sc.codigo}
                     className={cn(
                       "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
                       yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"

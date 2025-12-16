@@ -206,6 +206,11 @@ export type OrderItem = {
   priceSource?: "lista" | "oferta" | "base";
   comboId?: string | null;
   kitId?: string | null;
+  esBonificacion?: boolean;
+  promoBonificacionId?: string;
+  ofertaIdAplicada?: string;
+  ofertaNombre?: string;
+  tipoOferta?: "discount" | "bonus";
 };
 
 export type OrderStatus =
@@ -288,6 +293,8 @@ export interface Order {
 export interface PriceList {
   id: string
   name: string
+  companyId?: string
+  tier?: number
   products: Record<string, number>
   isActive: boolean
   createdAt: Date
@@ -389,6 +396,8 @@ export interface PriceListRow {
   id: string;
   name: string;
   isActive: boolean;
+  companyId?: string;
+  tier?: number;
   scope?: any;
   version?: number;
   updatedAt: string;
@@ -412,6 +421,18 @@ export interface CatalogoGeneral {
   tipoPadre: string | null;   // 👈 antes solo string
   codigoPadre: string | null; // 👈 antes solo string
   codigoEmpresa: string;
+}
+
+export interface Visita {
+  id: string
+  clienteId?: string
+  clienteCodigo?: string
+  motivo: string
+  notas?: string
+  fecha?: string
+  createdAt?: string
+  synced?: boolean
+  serverId?: string
 }
 
 

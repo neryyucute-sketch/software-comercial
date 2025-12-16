@@ -1,8 +1,44 @@
 export type OfferType = "discount" | "bonus" | "combo" | "kit" | "pricelist";
 export type OfferDateRange = { validFrom: string; validTo: string; };
 
-export type DiscountConfig = { percent?: number; amount?: number; minQty?: number; minAmount?: number;type?:string; value?:number| undefined; };
-export type BonusConfig = { buyQty: number; bonusQty: number; productId?: string; sameAsQualifier?: boolean; };
+export type DiscountTier = {
+  from?: number; // cantidad mínima inclusive
+  to?: number;   // cantidad máxima inclusive (vacío = en adelante)
+  percent?: number;
+  amount?: number;
+};
+
+export type DiscountConfig = {
+  percent?: number;
+  amount?: number;
+  minQty?: number;
+  minAmount?: number;
+  type?: string;
+  value?: number | undefined;
+  tiers?: DiscountTier[];
+  perLine?: boolean;
+};
+
+export type BonusTargetType = "same" | "sku" | "linea" | "familia";
+
+export type BonusTarget = {
+  type: BonusTargetType;
+  productId?: string;     // when type === "sku"
+  lineaId?: string;       // when type === "linea"
+  familiaId?: string;     // when type === "familia"
+  requiereSeleccionUsuario?: boolean;
+};
+
+export type BonusConfig = {
+  mode?: "acumulado" | "por_linea"; // default acumulado
+  buyQty?: number;        // legacy: cada N (sinónimo everyN)
+  everyN?: number;        // preferido: cada N unidades califican
+  bonusQty?: number;      // legacy: M unidades bonificadas (sinónimo givesM)
+  givesM?: number;        // preferido: M a bonificar por aplicación
+  maxApplications?: number; // límite opcional de aplicaciones
+  target?: BonusTarget;   // qué se bonifica
+  sameAsQualifier?: boolean; // legacy flag
+};
 export type PackItem = { productId: string; qty: number; description?: string; };
 
 export type OfferScope = {

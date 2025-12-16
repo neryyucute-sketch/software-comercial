@@ -270,11 +270,72 @@ export function OfferTabProducts({
       return;
     }
   
+    setProductosMap((prev) => {
+      const next = new Map(prev);
+      next.set(codigo, producto);
+      return next;
+    });
+
     update((d) => ({
       ...d,
       products: [...actuales, codigo],
     }));
   };
+
+  useEffect(() => {
+    if (productosRemote.length === 0) return;
+    setProductosMap((prev) => {
+      const next = new Map(prev);
+      productosRemote.forEach((p: any) => {
+        const code = p.codigoProducto ?? p.codigo;
+        if (!next.has(code)) next.set(code, p);
+      });
+      return next;
+    });
+  }, [productosRemote]);
+
+  useEffect(() => {
+    const faltantes = (draft.products ?? []).filter((code) => !productosMap.has(code));
+    if (faltantes.length === 0) return;
+
+    const controller = new AbortController();
+
+    const fetchMissing = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10931/preventa/api/v1";
+        const token = await getAccessToken();
+        const headers: HeadersInit = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        };
+
+        const requests = faltantes.map(async (code) => {
+          const url = `${API_BASE}/catalogo-productos?q=${encodeURIComponent(code)}&page=0&size=1`;
+          const res = await fetch(url, { headers, signal: controller.signal });
+          if (!res.ok) return null;
+          const data = await res.json();
+          const item = data.content?.[0];
+          if (!item) return null;
+          const codigo = item.codigoProducto ?? item.codigo;
+          return codigo ? { codigo, item } : null;
+        });
+
+        const resolved = await Promise.all(requests);
+        setProductosMap((prev) => {
+          const next = new Map(prev);
+          resolved.forEach((entry) => {
+            if (entry) next.set(entry.codigo, entry.item);
+          });
+          return next;
+        });
+      } catch (err: any) {
+        if (err.name === "AbortError") return;
+      }
+    };
+
+    fetchMissing();
+    return () => controller.abort();
+  }, [draft.products, productosMap]);
 
   // =========================================================
   //  CRITERIO: PROVEEDOR
@@ -429,7 +490,7 @@ export function OfferTabProducts({
                 
                 return (
                   <div
-                    key={p.idt ?? p.id ?? codigo}
+                    key={codigo}
                     className={cn(
                       "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
                       yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"
