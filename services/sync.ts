@@ -39,6 +39,9 @@ import { getAccessToken } from "./auth";
           query ? "&" : "?"
         }page=${page}&size=50`;
 
+        console.debug("[syncData] Fetching:", url);
+        console.debug("[syncData] Token present:", !!token);
+
         // 🔒 Seguridad: Timeout de 30 segundos
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -51,6 +54,8 @@ import { getAccessToken } from "./auth";
             signal: controller.signal,
           });
           clearTimeout(timeoutId);
+
+          console.debug("[syncData] Response status:", res.status);
 
           if (!res.ok) {
             const errorText = await res.text();

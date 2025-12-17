@@ -11,7 +11,10 @@ import { syncOfflineQueue } from "@/lib/offline-queue"
 import { syncData } from "@/services/sync"
 import { saveData } from "@/lib/db"
 import { Product, Cliente } from "@/lib/types"
-import { useAuth } from "@/contexts/AuthContext"  // 👈 importa el context
+import { useAuth } from "@/contexts/AuthContext"
+import { /*syncOfertasPreventa,*/ } from "@/services/ofertas"
+import { materializeOffer } from "@/services/offers.materializer"
+import { getTokens } from "@/services/auth"
 
 interface SyncStatus {
   isOnline: boolean
@@ -22,9 +25,9 @@ interface SyncStatus {
 }
 
 export function SyncManager() {
-  const { user } = useAuth(); // 👈 obtenemos el usuario actual del contexto
+  const { user } = useAuth()
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
-    isOnline: navigator.onLine,
+    isOnline: typeof navigator !== "undefined" ? navigator.onLine : true,
     lastSync: null,
     pendingOrders: 0,
     syncing: false,
@@ -34,14 +37,12 @@ export function SyncManager() {
   const { getOfflineOrders, clearOfflineOrders } = useOfflineStorage()
 
   useEffect(() => {
-    // Monitor online status
     const handleOnline = () => setSyncStatus((prev) => ({ ...prev, isOnline: true }))
     const handleOffline = () => setSyncStatus((prev) => ({ ...prev, isOnline: false }))
 
     window.addEventListener("online", handleOnline)
     window.addEventListener("offline", handleOffline)
 
-    // Check pending orders
     const checkPendingOrders = async () => {
       const orders = await getOfflineOrders()
       setSyncStatus((prev) => ({ ...prev, pendingOrders: orders.length }))
@@ -49,7 +50,6 @@ export function SyncManager() {
 
     checkPendingOrders()
 
-    // Auto-sync when online
     if (navigator.onLine) {
       autoSync()
     }
@@ -58,42 +58,139 @@ export function SyncManager() {
       window.removeEventListener("online", handleOnline)
       window.removeEventListener("offline", handleOffline)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const autoSync = async () => {
     if (syncStatus.syncing) return
 
+    const tokens = await getTokens();
+    if (!tokens) {
+      console.warn("[sync-manager] sync skipped: no active session");
+      setSyncStatus((prev) => ({ ...prev, syncing: false }));
+      return;
+    }
+
     setSyncStatus((prev) => ({ ...prev, syncing: true, progress: 0 }))
 
     try {
-      // 1. Sync products
+      // DEV: opcionalmente limpiar caches que empiecen con 'preventa' para evitar respuestas stale
+      try {
+        if ((process.env.NEXT_PUBLIC_FORCE_CACHE_CLEAR === "1") && typeof caches !== "undefined") {
+          const keys = await caches.keys();
+          await Promise.all(keys.filter(k => k.includes("preventa")).map(k => caches.delete(k)));
+          console.debug("[sync-manager] cleared caches before sync (DEV_FORCE)");
+        }
+      } catch (e) {
+        console.debug("[sync-manager] cache clear skipped/error:", e);
+      }
+      // Datos de empresa/vendedor
       const vendedorConf = user?.usuarioConfiguracion.find(
         (item: any) => item.configuracion === "CODIGO_VENDEDOR"
-      );
-      const codigoEmpresa = vendedorConf?.codigoEmpresa??"";
-      const codigoVendedor = vendedorConf?.valor??"";
-      const params: Record<string, string> = {  codigoEmpresa:codigoEmpresa, codigoVendedor: codigoVendedor };
-      let resultsProductos: Product[] = []
-      const rawProductos = await syncData("catalogo-productos/porVendedor", "products", 20, params);
-      resultsProductos = (rawProductos ?? []) as Product[]
-      await saveData("products", resultsProductos);
-      // 2. Sync customers
-      const rawClientes = await syncData("catalogo-clientes/porEmpresaVendedorRuta", "products", 20, params);
-      let resultsClientes = (rawClientes ?? []) as Cliente[]
-      await saveData("clientes", resultsClientes);
+      )
+      const codigoEmpresa = vendedorConf?.codigoEmpresa ?? ""
+      const codigoVendedor = vendedorConf?.valor ?? ""
+      const params: Record<string, string> = { codigoEmpresa, codigoVendedor }
 
-      // 3. Sync offers
-      await syncData("customers", "customers", 60)
+      // 1) Productos
+      const rawProductos = await syncData("catalogo-productos/porVendedor", "Productos", 20, params)
+      const productos = (rawProductos ?? []) as Product[]
+      await saveData("products", productos)
+      setSyncStatus((prev) => ({ ...prev, progress: 20 }))
 
-      // 4. Upload pending orders
+      // 2) Clientes
+      const rawClientes = await syncData("catalogo-clientes/porEmpresaVendedorRuta", "Clientes", 40, params)
+      const clientes = (rawClientes ?? []) as Cliente[]
+      await saveData("clientes", clientes)
+      setSyncStatus((prev) => ({ ...prev, progress: 40 }))
+
+      // 3) Ofertas preventa (se consultan en línea y se guardan local para uso offline)
+      const rawOfertas = await syncData("oferta-preventa", "Ofertas Preventa", 20, params)
+      const ofertas = (rawOfertas ?? []).map((item: any) => {
+        const parseDetalle = (src: any) => {
+          try {
+            if (!src) return null;
+            if (typeof src === "string") return JSON.parse(src);
+            return src;
+          } catch (e) {
+            console.warn("[sync-manager] ofertaDetalle parse failed", e, src);
+            return null;
+          }
+        };
+
+        const detalle = parseDetalle(item.ofertaDetalle) || parseDetalle(item.detalle) || {};
+        // Amplios fallbacks para campos comunes en distintos backends
+        const description = detalle.description || detalle.descripcion || item.descripcion || "";
+        const dates = detalle.dates || {
+          validFrom: detalle.validFrom || detalle.fechaDesde || item.fechaDesde || null,
+          validTo: detalle.validTo || detalle.fechaHasta || item.fechaHasta || null,
+        };
+        const scope = detalle.scope || detalle.ambito || item.scope || {};
+
+        return {
+          id: item.uuidOferta || detalle.id || `${item.id || item.uuid || Math.random()}`,
+          serverId: item.uuidOferta || item.uuid || item.id,
+          codigoEmpresa: item.codigoEmpresa || detalle.codigoEmpresa || detalle.empresa || item.empresa,
+          type: detalle.type || detalle.tipo || item.tipoOferta || item.type || "discount",
+          name: detalle.name || detalle.nombre || item.nombre || item.name || "",
+          description,
+          status: detalle.status || detalle.estado || item.estado || "draft",
+          dates: {
+            validFrom: dates.validFrom,
+            validTo: dates.validTo,
+          },
+          scope,
+          products: detalle.products || detalle.productos || item.products || item.productos || [],
+          familias: detalle.familias || detalle.family || item.familias || [],
+          subfamilias: detalle.subfamilias || item.subfamilias || [],
+          proveedores: detalle.proveedores || detalle.proveedoresIds || item.proveedores || [],
+          discount: detalle.discount || detalle.descuento || item.discount,
+          bonus: detalle.bonus || item.bonus,
+          pack: detalle.pack || item.pack,
+          version: item.version || detalle.version || 1,
+          updatedAt: item.fechaModificacion || detalle.updatedAt || new Date().toISOString(),
+          dirty: false,
+          deleted: item.eliminado || detalle.eliminado || false,
+          // Guardar el payload crudo para inspección/debug (ya con detalle parseado si existía)
+          raw: { ...item, ofertaDetalle: detalle || item.ofertaDetalle },
+        } as any;
+      })
+
+      await saveData("offer_defs", ofertas)
+      console.debug('[sync-manager] saved ofertas:', ofertas.length, ofertas[0]?.raw ? ofertas[0].raw : ofertas[0]);
+      // Notificar a la UI que las ofertas fueron sincronizadas (para recargar sin recargar la página)
+      try {
+        window.dispatchEvent(new CustomEvent("offers:synced", { detail: { count: ofertas.length } }));
+      } catch (e) {
+        console.debug("[sync-manager] cannot dispatch offers:synced event:", e);
+      }
+      // Materializar para crear offer_targets y pack_items
+      for (const ofe of ofertas) {
+        try {
+          await materializeOffer(ofe.id)
+        } catch (e) {
+          console.warn("[sync-manager] materializeOffer failed for", ofe.id, e)
+        }
+      }
+
+      // Notificar UI
+      try {
+        window.dispatchEvent(new CustomEvent("offers:synced", { detail: { count: ofertas.length } }));
+      } catch (e) {
+        console.debug("[sync-manager] cannot dispatch offers:synced event:", e);
+      }
+
+      setSyncStatus((prev) => ({ ...prev, progress: 60 }))
+
+      // 4) Subir pedidos pendientes
       if (syncStatus.pendingOrders > 0) {
         await syncOfflineQueue()
         await clearOfflineOrders()
       }
-      await syncData("orders", "orders", 80)
+      setSyncStatus((prev) => ({ ...prev, progress: 80 }))
 
-      // 5. Sync stats
-      await syncData("stats", "stats", 100)
+      // 5) (Opcional) Estadísticas u otros recursos
+      // await syncData("stats", "Estadísticas", 100, params)
 
       setSyncStatus((prev) => ({
         ...prev,
@@ -140,7 +237,7 @@ export function SyncManager() {
       </CardHeader>
 
       <CardContent className="space-y-4">
-        {/* Sync Progress */}
+        {/* Progreso */}
         {syncStatus.syncing && (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
@@ -151,15 +248,17 @@ export function SyncManager() {
           </div>
         )}
 
-        {/* Pending Orders */}
+        {/* Pedidos pendientes */}
         {syncStatus.pendingOrders > 0 && (
           <div className="flex items-center gap-2 p-3 bg-yellow-50 rounded-lg">
             <Clock className="w-4 h-4 text-yellow-600" />
-            <span className="text-sm text-yellow-800">{syncStatus.pendingOrders} pedidos pendientes de envío</span>
+            <span className="text-sm text-yellow-800">
+              {syncStatus.pendingOrders} pedidos pendientes de envío
+            </span>
           </div>
         )}
 
-        {/* Last Sync */}
+        {/* Última sync */}
         {syncStatus.lastSync && (
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <CheckCircle className="w-4 h-4 text-green-600" />
@@ -167,7 +266,7 @@ export function SyncManager() {
           </div>
         )}
 
-        {/* Sync Button */}
+        {/* Botón de sync */}
         <Button onClick={manualSync} disabled={syncStatus.syncing || !syncStatus.isOnline} className="w-full">
           {syncStatus.syncing ? (
             <>
@@ -182,7 +281,7 @@ export function SyncManager() {
           )}
         </Button>
 
-        {/* Offline Notice */}
+        {/* Aviso offline */}
         {!syncStatus.isOnline && (
           <div className="flex items-center gap-2 p-3 bg-blue-50 rounded-lg">
             <AlertCircle className="w-4 h-4 text-blue-600" />

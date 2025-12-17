@@ -1,5 +1,6 @@
 import { SyncManager } from "@/components/sync-manager"
 
+
 export default function SyncPage() {
   return (
     <div className="container mx-auto px-4 py-8">

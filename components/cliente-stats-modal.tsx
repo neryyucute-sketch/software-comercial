@@ -1,10 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { X, TrendingUp, ShoppingCart, Calendar, DollarSign } from "lucide-react";
 import type { Cliente } from "@/lib/types";
+import { usePreventa } from "@/contexts/preventa-context";
 
 // 🔹 Props adaptados
 interface ClienteStatsProps {
@@ -12,32 +14,166 @@ interface ClienteStatsProps {
   onClose: () => void;
 }
 
+type BackendSalesStats = {
+  totalPedidos?: number;
+  totalVentas?: number;
+  promedioPorPedido?: number;
+  ultimoPedido?: string;
+  topProductos?: Array<{ id?: string; codigo?: string; nombre?: string; cantidad: number; monto: number }>;
+  comprasMensuales?: Array<{ mes: string; pedidos: number; monto: number }>;
+  ultimosPedidos?: Array<{ id: string; fecha: string; total: number; estado?: string }>;
+};
+
+const asDate = (value: any): Date | undefined => {
+  if (!value) return undefined;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+};
+
+const formatMonthLabel = (date: Date) =>
+  date.toLocaleDateString("es-ES", {
+    month: "short",
+    year: "numeric",
+  });
+
 export default function ClienteStatsModal({ cliente, onClose }: ClienteStatsProps) {
-  // ⚠️ Por ahora no tenemos pedidos integrados a Cliente,
-  // así que dejo data dummy que luego puedes conectar con tu backend.
-  const totalOrders = 12;
-  const totalAmount = 45000;
-  const averageOrderValue = totalAmount / totalOrders;
-  const lastOrderDate = new Date();
+  const { orders, products } = usePreventa();
+  const [salesStats, setSalesStats] = useState<BackendSalesStats | null>(null);
 
-  const topProducts = [
-    { id: "1", name: "Producto A", quantity: 10, totalAmount: 5000 },
-    { id: "2", name: "Producto B", quantity: 8, totalAmount: 3200 },
-  ];
+  // Carga opcional desde backend (solo si configuras NEXT_PUBLIC_STATS_API_URL)
+  useEffect(() => {
+    const base = process.env.NEXT_PUBLIC_STATS_API_URL;
+    if (!base || !cliente?.codigoCliente) {
+      setSalesStats(null);
+      return;
+    }
 
-  const monthlyPurchases = [
-    { month: "Ene 2025", orders: 2, amount: 5000 },
-    { month: "Feb 2025", orders: 3, amount: 9000 },
-    { month: "Mar 2025", orders: 1, amount: 3000 },
-    { month: "Abr 2025", orders: 4, amount: 12000 },
-    { month: "May 2025", orders: 2, amount: 16000 },
-    { month: "Jun 2025", orders: 0, amount: 0 },
-  ];
+    let active = true;
+    const load = async () => {
+      try {
+        const res = await fetch(`${base}/clientes/${cliente.codigoCliente}/stats`);
+        if (!res.ok) return;
+        const data = (await res.json()) as BackendSalesStats;
+        if (active) setSalesStats(data);
+      } catch (error) {
+        // silenciar errores, se usa fallback local
+        if (active) setSalesStats(null);
+      }
+    };
 
-  const lastOrders = [
-    { id: "P-001", fecha: "01/05/2025", total: 1200, status: "entregado" },
-    { id: "P-002", fecha: "10/05/2025", total: 3500, status: "pendiente" },
-  ];
+    load();
+    return () => {
+      active = false;
+    };
+  }, [cliente?.codigoCliente]);
+
+  const stats = useMemo(() => {
+    const customerOrders = orders.filter((order) => order.codigoCliente === cliente.codigoCliente);
+
+    const totalOrders = customerOrders.length;
+    const totalAmount = customerOrders.reduce((sum, order) => sum + (order.total ?? order.subtotal ?? 0), 0);
+    const averageOrderValue = totalOrders > 0 ? totalAmount / totalOrders : 0;
+
+    const lastOrderDate = customerOrders
+      .map((order) => asDate(order.createdAt ?? order.fecha))
+      .filter(Boolean) as Date[];
+    const latestOrder = lastOrderDate.length ? new Date(Math.max(...lastOrderDate.map((d) => d.getTime()))) : undefined;
+
+    const productStats = new Map<string, { quantity: number; amount: number; name?: string }>();
+    customerOrders.forEach((order) => {
+      order.items?.forEach((item) => {
+        const key = item.productoId || item.id;
+        if (!key) return;
+        const current = productStats.get(key) || { quantity: 0, amount: 0, name: item.descripcion };
+        const amount = item.total ?? item.subtotal ?? 0;
+        productStats.set(key, {
+          quantity: current.quantity + item.cantidad,
+          amount: current.amount + amount,
+          name:
+            current.name ||
+            products.find((p) => p.idt === key || p.codigoProducto === key)?.descripcion ||
+            item.descripcion,
+        });
+      });
+    });
+
+    const topProducts = Array.from(productStats.entries())
+      .map(([id, value]) => ({
+        id,
+        name: value.name || "Producto",
+        quantity: value.quantity,
+        totalAmount: value.amount,
+      }))
+      .sort((a, b) => b.totalAmount - a.totalAmount)
+      .slice(0, 5);
+
+    const monthlyPurchases = [] as Array<{ month: string; orders: number; amount: number }>;
+    for (let i = 5; i >= 0; i--) {
+      const date = new Date();
+      date.setMonth(date.getMonth() - i);
+      const monthOrders = customerOrders.filter((order) => {
+        const orderDate = asDate(order.createdAt ?? order.fecha);
+        return (
+          orderDate &&
+          orderDate.getFullYear() === date.getFullYear() &&
+          orderDate.getMonth() === date.getMonth()
+        );
+      });
+
+      monthlyPurchases.push({
+        month: formatMonthLabel(date),
+        orders: monthOrders.length,
+        amount: monthOrders.reduce((sum, order) => sum + (order.total ?? order.subtotal ?? 0), 0),
+      });
+    }
+
+    const lastOrders = [...customerOrders]
+      .sort((a, b) => {
+        const da = asDate(a.createdAt ?? a.fecha)?.getTime() ?? 0;
+        const db = asDate(b.createdAt ?? b.fecha)?.getTime() ?? 0;
+        return db - da;
+      })
+      .slice(0, 5)
+      .map((order) => ({
+        id: order.numeroPedido || order.serverId || order.id,
+        fecha: asDate(order.createdAt ?? order.fecha)?.toLocaleDateString() ?? "",
+        total: order.total ?? order.subtotal ?? 0,
+        status: order.estado || "pendiente",
+      }));
+
+    if (!salesStats) {
+      return { totalOrders, totalAmount, averageOrderValue, lastOrderDate: latestOrder, topProducts, monthlyPurchases, lastOrders };
+    }
+
+    return {
+      totalOrders: salesStats.totalPedidos ?? totalOrders,
+      totalAmount: salesStats.totalVentas ?? totalAmount,
+      averageOrderValue: salesStats.promedioPorPedido ?? averageOrderValue,
+      lastOrderDate: asDate(salesStats.ultimoPedido) ?? latestOrder,
+      topProducts:
+        salesStats.topProductos?.map((p, idx) => ({
+          id: p.id || p.codigo || String(idx),
+          name: p.nombre || p.codigo || "Producto",
+          quantity: p.cantidad,
+          totalAmount: p.monto,
+        })) ?? topProducts,
+      monthlyPurchases:
+        salesStats.comprasMensuales?.map((m) => ({
+          month: m.mes,
+          orders: m.pedidos,
+          amount: m.monto,
+        })) ?? monthlyPurchases,
+      lastOrders:
+        salesStats.ultimosPedidos?.map((o) => ({
+          id: o.id,
+          fecha: asDate(o.fecha)?.toLocaleDateString() ?? "",
+          total: o.total,
+          status: o.estado || "pendiente",
+        })) ?? lastOrders,
+    };
+  }, [cliente.codigoCliente, orders, products, salesStats]);
+
+  const { totalOrders, totalAmount, averageOrderValue, lastOrderDate, topProducts, monthlyPurchases, lastOrders } = stats;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">

@@ -1,6 +1,7 @@
 import Dexie, { Table } from "dexie";
-import type { Product, VendedorRestriccion, AuthUser, DeviceCache, Cliente, Tokens, Order, Combo, Kit, PriceList, Vendedor, Offer } from "./types";
+import type { Product, VendedorRestriccion, AuthUser, DeviceCache, Cliente, Tokens, Order, Combo, Kit, PriceList, Vendedor, Offer, PriceListRow, PriceListItemRow, Visita } from "./types";
 import { encryptData, decryptData } from "./crypto-utils";
+import type { OfferDef } from "./types.offers";
 
 // 🔹 Tipo para el token cacheado
 export interface AuthCache {
@@ -10,6 +11,16 @@ export interface AuthCache {
   expiresAt: number;
   user: AuthUser; // 👈 agregamos aquí el usuario completo
   deviceId : string;
+}
+
+export interface OfferTargetRow {
+  id?: number;
+  offerId: string;
+  type: "discount"|"bonus"|"combo"|"kit";
+  productId: string;
+  validFrom: string;
+  validTo: string;
+  status: "active"|"inactive";
 }
 
 // 🔹 Definimos la clase DB extendiendo Dexie
@@ -29,11 +40,19 @@ export class PreventaDB extends Dexie {
   kits!: Dexie.Table<Kit, string>;
   priceLists!: Dexie.Table<PriceList, string>;
   vendedor!: Dexie.Table<Vendedor, string>;
+  offer_defs!: Table<OfferDef, string>;
+  offer_targets!: Table<OfferTargetRow, number>;
+  pack_items!: Table<{ id?: number; offerId: string; productId: string; qty: number; description?: string }, number>;
+  price_lists!: Table<PriceListRow, string>;
+  price_list_items!: Table<PriceListItemRow, number>;
+  catalogos!: Table<{ id: string; tipo: string; codigo: string; descripcion: string; codigoPadre: string }, string>;
+  visits!: Table<Visita, string>;
+  
   constructor() {
     super("preventa_offline");
 
     // ⚡️ Esquema de IndexedDB
-    this.version(8).stores({
+    this.version(9).stores({
       products:
         "codigoProducto, descripcion, codigoProveedor, proveedor, codigoFamilia, familia, codigoSubfamilia, subfamilia, codigoFiltroVenta, filtroVenta, urlImg",
       clientes: "idt, codigoCliente, nombre, nit, telefono, correo, updatedAt",
@@ -49,13 +68,26 @@ export class PreventaDB extends Dexie {
       kits:"idt,descripcion",
       priceLists:"idt,descripcion",
       vendedor:"idt,codigoVendedor",
-      offers:"idt,descripcion"
+      offers:"idt,descripcion",
+      offer_defs: "id, type, status, updatedAt, deleted, dirty",
+      offer_targets: "++id, offerId, productId, type, status",
+      pack_items: "++id, offerId, productId",
+      visits: "id, clienteId, clienteCodigo, fecha, motivo, createdAt"
     });
   }
 }
 
 // Instancia única
 export const db = new PreventaDB();
+
+// DEV: exponer `db` en window para depuración en consola (solo en entorno navegador)
+if (typeof window !== "undefined") {
+  try {
+    (window as any).db = db;
+  } catch (e) {
+    // no-op
+  }
+}
 
 // -------------------------------
 // Helpers reutilizables

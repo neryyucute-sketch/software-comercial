@@ -26,6 +26,7 @@ export function OfferForm({ offer, onClose }: OfferFormProps) {
     products: offer?.products || [],
     discountPercent: offer?.discountPercent || 0,
     discountAmount: offer?.discountAmount || 0,
+    stackableWithSameProduct: (offer as any)?.stackableWithSameProduct ?? false,
     isActive: offer?.isActive ?? true,
     validFrom: offer?.validFrom
       ? (() => {
@@ -57,6 +58,7 @@ export function OfferForm({ offer, onClose }: OfferFormProps) {
       discountPercent:
         formData.type === "discount" && formData.discountPercent > 0 ? formData.discountPercent : undefined,
       discountAmount: formData.type === "discount" && formData.discountAmount > 0 ? formData.discountAmount : undefined,
+      stackableWithSameProduct: formData.stackableWithSameProduct,
     }
 
     if (offer) {
@@ -210,16 +212,16 @@ export function OfferForm({ offer, onClose }: OfferFormProps) {
                 ) : (
                   <div className="space-y-2">
                     {activeProducts.map((product) => (
-                      <div key={product.id} className="flex items-center space-x-2">
+                      <div key={product.idt} className="flex items-center space-x-2">
                         <input
                           type="checkbox"
-                          id={`product-${product.id}`}
-                          checked={formData.products.includes(product.id)}
-                          onChange={() => handleProductToggle(product.id)}
+                          id={`product-${product.idt}`}
+                          checked={formData.products.includes(product.idt)}
+                          onChange={() => handleProductToggle(product.idt)}
                           className="rounded border-gray-300"
                         />
-                        <label htmlFor={`product-${product.id}`} className="flex-1 text-sm">
-                          {product.name} - Q{product.price.toLocaleString()}
+                        <label htmlFor={`product-${product.idt}`} className="flex-1 text-sm">
+                          {product.descripcion} - Q{product.precio.toLocaleString()}
                         </label>
                       </div>
                     ))}
@@ -238,6 +240,22 @@ export function OfferForm({ offer, onClose }: OfferFormProps) {
                 className="rounded border-gray-300"
               />
               <Label htmlFor="isActive">Oferta activa</Label>
+            </div>
+
+            <div className="flex items-start space-x-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <input
+                id="stackableWithSameProduct"
+                type="checkbox"
+                checked={formData.stackableWithSameProduct}
+                onChange={(e) => handleChange("stackableWithSameProduct", e.target.checked)}
+                className="mt-1 rounded border-gray-300"
+              />
+              <div>
+                <Label htmlFor="stackableWithSameProduct">Permitir combinar con otras ofertas del mismo producto</Label>
+                <p className="text-xs text-gray-500">
+                  Activa esta opción si la oferta puede coexistir con otra que afecte el mismo producto.
+                </p>
+              </div>
             </div>
 
             <div className="flex gap-2 pt-4">

@@ -91,9 +91,13 @@ async function cacheFirstUpdateImages(request: Request) {
   const cached = await cache.match(request);
 
   if (cached) {
-    fetch(request).then((res) => {
+    fetch(request).then(async (res) => {
       if (res.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
-        cache.put(request, res.clone());
+        try {
+          await cache.put(request, res.clone());
+        } catch (e) {
+          console.warn("[sw] cache.put failed (images update):", e);
+        }
       }
     });
     return cached;
@@ -102,7 +106,11 @@ async function cacheFirstUpdateImages(request: Request) {
   try {
     const res = await fetch(request);
       if (res.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
-        cache.put(request, res.clone());
+        try {
+          await cache.put(request, res.clone());
+        } catch (e) {
+          console.warn("[sw] cache.put failed (images fetch):", e);
+        }
       }
     return res;
   } catch {
@@ -115,13 +123,17 @@ async function staleWhileRevalidate(request: Request): Promise<Response> {
   const cache = await caches.open(STATIC_CACHE);
   const cachedResponse = await cache.match(request);
 
-  try {
+    try {
     const fetchResponse = await fetch(request);
     if (fetchResponse.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
-        cache.put(request, fetchResponse.clone());
+        try {
+          await cache.put(request, fetchResponse.clone());
+        } catch (e) {
+          console.warn("[sw] cache.put failed (staleWhileRevalidate):", e);
+        }
     }
     return fetchResponse;
-  } catch {
+  } catch (err) {
     if (cachedResponse) return cachedResponse;
     return new Response("Offline", { status: 503 });
   }
@@ -140,10 +152,14 @@ async function networkFirstAPI(request: Request) {
   try {
     const response = await fetch(request);
     if (response.ok && isCacheableRequest(request)) {
-      cache.put(request, response.clone());
+      try {
+        await cache.put(request, response.clone());
+      } catch (e) {
+        console.warn("[sw] cache.put failed (networkFirstAPI):", e);
+      }
     }
     return response;
-  } catch {
+  } catch (err) {
     const cached = await cache.match(request);
     return cached || new Response("Offline data not available", { status: 503 });
   }

@@ -14,6 +14,8 @@ import ClientWrapper from "../components/client-wrapper";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import { ClientesProvider } from "@/contexts/ClientesContext";
 import { OrdersProvider } from "@/contexts/OrdersContext";
+import { OffersProvider } from "@/contexts/offers-context";
+import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: "Sistema de Preventa",
@@ -40,8 +42,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <ClientesProvider>
                   <ProductsProvider>
                     <OrdersProvider>
-                      <ClientWrapper>{children}</ClientWrapper>
-                      <ServiceWorkerRegister /> {/* ✅ Aquí queda */}
+                      <OffersProvider>
+                        <ClientWrapper>{children}</ClientWrapper>
+                        <Toaster />
+                        <ServiceWorkerRegister /> {/* ✅ Aquí queda */}
+                      </OffersProvider>
                     </OrdersProvider>
                   </ProductsProvider>
                 </ClientesProvider>

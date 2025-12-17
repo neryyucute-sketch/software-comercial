@@ -1,550 +1,547 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { usePreventa } from "@/contexts/preventa-context"
-import { useAuth } from "@/contexts/AuthContext"
-import { Plus, Search, Edit, Eye, EyeOff, Shield, Gift, Package } from "lucide-react"
-import { OfferForm } from "@/components/offer-form"
-import { ComboForm } from "@/components/combo-form"
-import { KitForm } from "@/components/kit-form"
-import type { Offer, Combo, Kit } from "@/lib/types"
-import { Tag } from "lucide-react"
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { OfferDef } from "@/lib/types.offers";
+import type { CatalogoGeneral } from "@/lib/types";
+import {
+  getOfferDefsOnline,
+  createOfferDefOnline,
+  updateOfferDefOnline,
+  deleteOfferDefOnline,
+} from "@/services/offers.repo";
+import { OfferEditorDialog } from "@/components/offers/editor/OfferEditorDialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Plus, Pencil, Trash2, Loader2, Tag, Calendar, Building2 } from "lucide-react";
+import { getAccessToken } from "@/services/auth";
+import { cn } from "@/lib/utils";
+
+const formatDate = (dateStr?: string) => {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("es-GT", { day: "2-digit", month: "2-digit", year: "numeric" });
+};
+
+const EMPRESAS = [
+  { codigo: "TODAS", nombre: "Todas las empresas" },
+  { codigo: "E01", nombre: "Codimisa" },
+  { codigo: "E07", nombre: "Dimisa" },
+];
+
+const TIPO_LABELS: Record<string, string> = {
+  discount: "Descuento",
+  bonus: "Bonificación",
+  combo: "Combo",
+  kit: "Kit",
+  pricelist: "Lista de Precios",
+};
+
+const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  draft: { bg: "bg-slate-50", text: "text-slate-700", border: "border-slate-200" },
+  active: { bg: "bg-green-50", text: "text-green-700", border: "border-green-200" },
+  inactive: { bg: "bg-red-50", text: "text-red-700", border: "border-red-200" },
+};
 
 export default function OffersPage() {
-  const { offers, combos, kits, products, updateOffer, updateCombo, updateKit } = usePreventa()
-  const { hasPermission } = useAuth()
-  const [searchTerm, setSearchTerm] = useState("")
-  const [typeFilter, setTypeFilter] = useState("all")
-  const [showOfferForm, setShowOfferForm] = useState(false)
-  const [showComboForm, setShowComboForm] = useState(false)
-  const [showKitForm, setShowKitForm] = useState(false)
-  const [editingOffer, setEditingOffer] = useState<Offer | null>(null)
-  const [editingCombo, setEditingCombo] = useState<Combo | null>(null)
-  const [editingKit, setEditingKit] = useState<Kit | null>(null)
+  const router = useRouter();
+  const [empresaSeleccionada, setEmpresaSeleccionada] = useState("TODAS");
+  const [ofertas, setOfertas] = useState<OfferDef[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [ofertaEditando, setOfertaEditando] = useState<OfferDef | null>(null);
 
-  const canRead = hasPermission("offers", "read")
-  const canCreate = hasPermission("offers", "create")
-  const canUpdate = hasPermission("offers", "update")
-  const canDelete = hasPermission("offers", "delete")
+  const [catalogos, setCatalogos] = useState<{
+    proveedores: CatalogoGeneral[];
+    familias: CatalogoGeneral[];
+    lineas: CatalogoGeneral[];
+    canalesVenta: CatalogoGeneral[];
+    subCanalesVenta: CatalogoGeneral[];
+  }>({
+    proveedores: [],
+    familias: [],
+    lineas: [],
+    canalesVenta: [],
+    subCanalesVenta: [],
+  });
 
-  if (!canRead) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <Card className="max-w-md">
-          <CardContent className="pt-6">
-            <div className="text-center">
-              <Shield className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="text-lg font-semibold mb-2">Acceso Denegado</h3>
-              <p className="text-muted-foreground">No tienes permisos para ver las ofertas.</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    )
+  const [catalogsLoading, setCatalogsLoading] = useState(false);
+  const [catalogsError, setCatalogsError] = useState<string | null>(null);
+
+  const [busqueda, setBusqueda] = useState("");
+  const [tipoSel, setTipoSel] = useState("todos");
+  const [estadoSel, setEstadoSel] = useState("todos");
+  const [fechaDesde, setFechaDesde] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 2, now.getDate());
+    return start.toISOString().split("T")[0];
+  });
+  const [fechaHasta, setFechaHasta] = useState(() => {
+    const now = new Date();
+    return now.toISOString().split("T")[0];
+  });
+  const [modoFecha, setModoFecha] = useState<"inicio" | "fin">("inicio");
+
+  useEffect(() => {
+    cargarCatalogos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    cargarOfertas();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [empresaSeleccionada]);
+
+async function cargarCatalogos() {
+  try {
+    setCatalogsLoading(true);
+    setCatalogsError(null);
+
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10931/preventa/api/v1";
+    
+    console.log('🔐 Paso 1: Obteniendo token...');
+    const token = await getAccessToken();
+    console.log('✅ Paso 2: Token obtenido');
+    
+    if (!token) {
+      throw new Error('No se obtuvo token');
+    }
+
+    const codigoEmpresa = "E01";
+
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    };
+
+    console.log('📡 Paso 3: Cargando todos los catálogos de E01...');
+
+    // 🔥 Cargar todos los catálogos en paralelo
+    const [proveedoresRes, familiasRes, lineasRes, canalesRes, subcanalesRes] = await Promise.all([
+      fetch(`${API_BASE}/catalogos-generales/${codigoEmpresa}/proveedor`, { headers }),
+      fetch(`${API_BASE}/catalogos-generales/${codigoEmpresa}/familia`, { headers }),
+      fetch(`${API_BASE}/catalogos-generales/${codigoEmpresa}/filtro_venta`, { headers }),
+      fetch(`${API_BASE}/catalogos-generales/${codigoEmpresa}/canal_venta`, { headers }),
+      fetch(`${API_BASE}/catalogos-generales/${codigoEmpresa}/sub_canal_venta`, { headers }),
+    ]);
+
+    console.log('📡 Paso 4: Responses recibidos');
+
+    // Parsear las respuestas
+    const [proveedores, familias, lineas, canales, subcanales] = await Promise.all([
+      proveedoresRes.json(),
+      familiasRes.json(),
+      lineasRes.json(),
+      canalesRes.json(),
+      subcanalesRes.json(),
+    ]);
+
+    console.log('📦 Paso 5: Todos los catálogos parseados:', {
+      proveedores: Array.isArray(proveedores) ? proveedores.length : 0,
+      familias: Array.isArray(familias) ? familias.length : 0,
+      lineas: Array.isArray(lineas) ? lineas.length : 0,
+      canales: Array.isArray(canales) ? canales.length : 0,
+      subcanales: Array.isArray(subcanales) ? subcanales.length : 0,
+    });
+
+    // Setear en el estado
+    setCatalogos({
+      proveedores: Array.isArray(proveedores) ? proveedores : [],
+      familias: Array.isArray(familias) ? familias : [],
+      lineas: Array.isArray(lineas) ? lineas : [],
+      canalesVenta: Array.isArray(canales) ? canales : [],
+      subCanalesVenta: Array.isArray(subcanales) ? subcanales : [],
+    });
+
+    console.log('✅ Paso 6: Todos los catálogos cargados exitosamente! 🎉');
+    setCatalogsLoading(false);
+
+  } catch (error: any) {
+    console.error("❌ ERROR cargando catálogos:", error);
+    console.error("❌ Error message:", error.message);
+    setCatalogsError(error.message || "Error cargando catálogos");
+    setCatalogsLoading(false);
   }
+}
 
-  const filteredOffers = offers.filter((offer) => {
-    const matchesSearch =
-      offer.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      offer.description.toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesType = typeFilter === "all" || offer.type === typeFilter
-    return matchesSearch && matchesType
-  })
-
-  const filteredCombos = combos.filter((combo) => {
-    const matchesSearch =
-      combo.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      combo.description.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesSearch
-  })
-
-  const filteredKits = (kits || []).filter((kit) => {
-    const matchesSearch =
-      kit.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      kit.description.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesSearch
-  })
-
-  const handleEditOffer = (offer: Offer) => {
-    setEditingOffer(offer)
-    setShowOfferForm(true)
-  }
-
-  const handleEditCombo = (combo: Combo) => {
-    setEditingCombo(combo)
-    setShowComboForm(true)
-  }
-
-  const handleEditKit = (kit: Kit) => {
-    setEditingKit(kit)
-    setShowKitForm(true)
-  }
-
-  const toggleOfferStatus = (offerId: string, isActive: boolean) => {
-    updateOffer(offerId, { isActive: !isActive })
-  }
-
-  const toggleComboStatus = (comboId: string, isActive: boolean) => {
-    updateCombo(comboId, { isActive: !isActive })
-  }
-
-  const toggleKitStatus = (kitId: string, isActive: boolean) => {
-    updateKit(kitId, { isActive: !isActive })
-  }
-
-  const handleOfferFormClose = () => {
-    setShowOfferForm(false)
-    setEditingOffer(null)
-  }
-
-  const handleComboFormClose = () => {
-    setShowComboForm(false)
-    setEditingCombo(null)
-  }
-
-  const handleKitFormClose = () => {
-    setShowKitForm(false)
-    setEditingKit(null)
-  }
-
-  const getOfferTypeBadge = (type: Offer["type"]) => {
-    switch (type) {
-      case "combo":
-        return <Badge variant="default">Combo</Badge>
-      case "kit":
-        return <Badge variant="secondary">Kit</Badge>
-      case "bonus":
-        return <Badge className="bg-green-500">Bonificación</Badge>
-      case "discount":
-        return <Badge variant="destructive">Descuento</Badge>
-      default:
-        return <Badge variant="outline">Desconocido</Badge>
+  async function cargarOfertas() {
+    try {
+      setLoading(true);
+      
+      if (empresaSeleccionada === "TODAS") {
+        const todasOfertas: OfferDef[] = [];
+        for (const emp of EMPRESAS.filter(e => e.codigo !== "TODAS")) {
+          const items = await getOfferDefsOnline(emp.codigo);
+          todasOfertas.push(...items);
+        }
+        setOfertas(todasOfertas);
+      } else {
+        const items = await getOfferDefsOnline(empresaSeleccionada);
+        setOfertas(items);
+      }
+    } catch (error: any) {
+      console.error("Error cargando ofertas:", error);
+      if (error.message.includes("401") || error.message.includes("403")) {
+        router.push("/login");
+      }
+    } finally {
+      setLoading(false);
     }
   }
 
-  const isOfferValid = (offer: Offer) => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
+  function handleNuevaOferta() {
+    const nuevaOferta: OfferDef = {
+      id: crypto.randomUUID(),
+      codigoEmpresa: empresaSeleccionada === "TODAS" ? "E01" : empresaSeleccionada,
+      type: "discount",
+      name: "",
+      description: "",
+      status: "draft",
+      dates: {
+        validFrom: new Date().toISOString().split("T")[0],
+        validTo: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      },
+      scope: {},
+      products: [],
+      familias: [],
+      subfamilias: [],
+      proveedores: [],
+      stackableWithSameProduct: false,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      dirty: false,
+      deleted: false,
+    };
 
-    const validFrom = new Date(offer.validFrom)
-    validFrom.setHours(0, 0, 0, 0)
-
-    const validTo = new Date(offer.validTo)
-    validTo.setHours(0, 0, 0, 0)
-
-    return today >= validFrom && today <= validTo
+    setOfertaEditando(nuevaOferta);
+    setEditorOpen(true);
   }
 
-  const isComboValid = (combo: Combo) => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-
-    const validFrom = new Date(combo.validFrom)
-    validFrom.setHours(0, 0, 0, 0)
-
-    const validTo = new Date(combo.validTo)
-    validTo.setHours(0, 0, 0, 0)
-
-    return today >= validFrom && today <= validTo
+  function handleEditarOferta(oferta: OfferDef) {
+    setOfertaEditando({ ...oferta });
+    setEditorOpen(true);
   }
 
-  const isKitValid = (kit: Kit) => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
+  async function handleGuardarOferta(oferta: OfferDef) {
+    try {
+      if (oferta.serverId) {
+        await updateOfferDefOnline(oferta);
+      } else {
+        await createOfferDefOnline(oferta);
+      }
 
-    const validFrom = new Date(kit.validFrom)
-    validFrom.setHours(0, 0, 0, 0)
-
-    const validTo = new Date(kit.validTo)
-    validTo.setHours(0, 0, 0, 0)
-
-    return today >= validFrom && today <= validTo
+      setEditorOpen(false);
+      setOfertaEditando(null);
+      await cargarOfertas();
+    } catch (error: any) {
+      console.error("Error guardando oferta:", error);
+      alert(`Error guardando oferta: ${error.message}`);
+    }
   }
+
+  async function handleEliminarOferta(oferta: OfferDef) {
+    if (!confirm(`¿Eliminar la oferta "${oferta.name}"?`)) return;
+
+    try {
+      const uuid = oferta.serverId || oferta.id;
+      await deleteOfferDefOnline(uuid);
+      await cargarOfertas();
+    } catch (error: any) {
+      console.error("Error eliminando oferta:", error);
+      alert(`Error eliminando oferta: ${error.message}`);
+    }
+  }
+
+  const ofertasFiltradas = useMemo(() => {
+    const term = busqueda.trim().toLowerCase();
+    const filtroDesde = fechaDesde ? Date.parse(fechaDesde) : null;
+    const filtroHasta = fechaHasta ? Date.parse(fechaHasta) : null;
+
+    const matchTerm = (value: string | undefined | null) => {
+      if (!term) return true;
+      return (value ?? "").toString().toLowerCase().includes(term);
+    };
+
+    const matchArray = (arr: string[] | undefined) => {
+      if (!term) return true;
+      if (!arr || arr.length === 0) return false;
+      return arr.some((code) => (code ?? "").toString().toLowerCase().includes(term));
+    };
+
+    return ofertas.filter((o) => {
+      const tipoLabel = TIPO_LABELS[o.type] || o.type;
+      const estadoLabel = o.status === "draft" ? "borrador" : o.status === "active" ? "activa" : o.status === "inactive" ? "inactiva" : o.status;
+
+      if (term) {
+        const hits = [
+          matchTerm(o.name),
+          matchTerm(o.description),
+          matchArray(o.products || o.scope?.codigosProducto),
+          matchArray(o.scope?.codigosCliente),
+          matchArray(o.proveedores || o.scope?.codigosProveedor),
+          matchArray(o.scope?.codigosLinea || o.lineas || o.familias || []),
+          matchArray(o.scope?.canales),
+          matchArray(o.scope?.subCanales),
+          matchTerm(tipoLabel),
+          matchTerm(estadoLabel),
+        ];
+        if (!hits.some(Boolean)) return false;
+      }
+
+      if (tipoSel !== "todos" && o.type !== tipoSel) return false;
+      if (estadoSel !== "todos" && o.status !== estadoSel) return false;
+
+      const vigenciaDesde = Date.parse(o.dates.validFrom ?? "");
+      const vigenciaHasta = Date.parse(o.dates.validTo ?? "");
+
+      if (modoFecha === "inicio") {
+        if (filtroDesde !== null && !Number.isNaN(vigenciaDesde) && vigenciaDesde < filtroDesde) return false;
+        if (filtroHasta !== null && !Number.isNaN(vigenciaDesde) && vigenciaDesde > filtroHasta) return false;
+      } else if (modoFecha === "fin") {
+        if (filtroDesde !== null && !Number.isNaN(vigenciaHasta) && vigenciaHasta < filtroDesde) return false;
+        if (filtroHasta !== null && !Number.isNaN(vigenciaHasta) && vigenciaHasta > filtroHasta) return false;
+      }
+
+      return true;
+    });
+  }, [ofertas, busqueda, fechaDesde, fechaHasta, tipoSel, estadoSel, modoFecha]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <div className="px-4 py-6 sm:px-0">
-          {/* Header */}
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">Ofertas y Promociones</h1>
-              <p className="mt-2 text-gray-600">Gestiona combos avanzados, kits, bonificaciones y descuentos</p>
-            </div>
-            {canCreate && (
-              <div className="flex gap-2">
-                <Button onClick={() => setShowKitForm(true)} className="bg-blue-600 hover:bg-blue-700">
-                  <Package className="w-4 h-4 mr-2" />
-                  Nuevo Kit
-                </Button>
-                <Button onClick={() => setShowComboForm(true)} className="bg-purple-600 hover:bg-purple-700">
-                  <Gift className="w-4 h-4 mr-2" />
-                  Nuevo Combo
-                </Button>
-                <Button onClick={() => setShowOfferForm(true)}>
-                  <Plus className="w-4 h-4 mr-2" />
-                  Nueva Oferta
-                </Button>
-              </div>
-            )}
+    <div className="container mx-auto p-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold text-slate-900">Gestión de Ofertas</h1>
+        <Button 
+          onClick={handleNuevaOferta} 
+          className="bg-black hover:bg-slate-800"
+          disabled={catalogsLoading}
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          {catalogsLoading ? "Cargando catálogos..." : "Nueva Oferta"}
+        </Button>
+      </div>
+
+      <div className="flex gap-4 items-center bg-white p-4 rounded-xl border border-slate-200">
+        <label className="font-semibold text-slate-700">Empresa:</label>
+        <Select value={empresaSeleccionada} onValueChange={setEmpresaSeleccionada}>
+          <SelectTrigger className="w-64">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {EMPRESAS.map((emp) => (
+              <SelectItem key={emp.codigo} value={emp.codigo}>
+                {emp.nombre}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-center">
+          <div className="lg:col-span-2">
+            <Input
+              placeholder="Buscar por nombre, descripción, producto, cliente, proveedor, línea, canal o subcanal"
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+            />
           </div>
-
-          {/* Filters */}
-          <div className="flex flex-col sm:flex-row gap-4 mb-6">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-              <Input
-                placeholder="Buscar ofertas y combos..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10"
-              />
-            </div>
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">Todos los tipos</option>
-              <option value="combo">Combos</option>
-              <option value="kit">Kits</option>
-              <option value="bonus">Bonificaciones</option>
-              <option value="discount">Descuentos</option>
-            </select>
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              type="date"
+              value={fechaDesde}
+              onChange={(e) => setFechaDesde(e.target.value)}
+              placeholder="Desde"
+            />
+            <Input
+              type="date"
+              value={fechaHasta}
+              onChange={(e) => setFechaHasta(e.target.value)}
+              placeholder="Hasta"
+            />
           </div>
-
-          <Tabs defaultValue="combos" className="w-full">
-            <TabsList className="grid w-full grid-cols-3">
-              <TabsTrigger value="combos" className="flex items-center gap-2">
-                <Gift className="w-4 h-4" />
-                Combos ({filteredCombos.length})
-              </TabsTrigger>
-              <TabsTrigger value="kits" className="flex items-center gap-2">
-                <Package className="w-4 h-4" />
-                Kits ({filteredKits.length})
-              </TabsTrigger>
-              <TabsTrigger value="offers" className="flex items-center gap-2">
-                <Tag className="w-4 h-4" />
-                Ofertas ({filteredOffers.length})
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="combos" className="mt-6">
-              {filteredCombos.length === 0 ? (
-                <Card>
-                  <CardContent className="flex flex-col items-center justify-center py-12">
-                    <div className="text-gray-500 text-center">
-                      <Gift className="w-12 h-12 mx-auto mb-4" />
-                      <h3 className="text-lg font-medium mb-2">No hay combos</h3>
-                      <p className="text-sm">
-                        {searchTerm
-                          ? "No se encontraron combos con los filtros aplicados"
-                          : "Comienza creando tu primer combo avanzado"}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {filteredCombos.map((combo) => (
-                    <Card key={combo.id} className="hover:shadow-lg transition-shadow border-purple-200">
-                      <CardHeader>
-                        <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              <Gift className="w-5 h-5 text-purple-600" />
-                              <CardTitle className="text-lg">{combo.name}</CardTitle>
-                            </div>
-                            <CardDescription className="mt-1">{combo.description}</CardDescription>
-                          </div>
-                          <div className="flex gap-1 ml-2">
-                            {canUpdate && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => toggleComboStatus(combo.id, combo.isActive)}
-                                title={combo.isActive ? "Desactivar combo" : "Activar combo"}
-                              >
-                                {combo.isActive ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                              </Button>
-                            )}
-                            {canUpdate && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleEditCombo(combo)}
-                                title="Editar combo"
-                              >
-                                <Edit className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="space-y-3">
-                          <div className="text-center p-3 bg-purple-50 rounded-lg">
-                            <div className="text-2xl font-bold text-purple-600">Q{combo.price.toLocaleString()}</div>
-                            <div className="text-sm text-gray-600">{combo.totalProducts} productos total</div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 text-sm">
-                            <div>
-                              <span className="text-gray-600">Productos fijos:</span>
-                              <div className="font-medium">{combo.fixedProducts.length}</div>
-                            </div>
-                            <div>
-                              <span className="text-gray-600">Opcionales:</span>
-                              <div className="font-medium">
-                                {combo.totalProducts - combo.fixedProducts.reduce((sum, p) => sum + p.quantity, 0)}
-                              </div>
-                            </div>
-                          </div>
-
-                          {(combo.restrictions.regions ||
-                            combo.restrictions.vendorIds ||
-                            combo.restrictions.customerCriteria?.channels) && (
-                            <div className="text-xs text-gray-500">
-                              <div className="font-medium mb-1">Restricciones:</div>
-                              {combo.restrictions.regions && (
-                                <div>• Regiones: {combo.restrictions.regions.join(", ")}</div>
-                              )}
-                              {combo.restrictions.customerCriteria?.channels && (
-                                <div>• Canales: {combo.restrictions.customerCriteria.channels.join(", ")}</div>
-                              )}
-                            </div>
-                          )}
-
-                          <div className="text-xs text-gray-500">
-                            <div>Válido desde: {new Date(combo.validFrom).toLocaleDateString()}</div>
-                            <div>Válido hasta: {new Date(combo.validTo).toLocaleDateString()}</div>
-                          </div>
-
-                          <div className="flex gap-2">
-                            <Badge variant={combo.isActive ? "default" : "secondary"}>
-                              {combo.isActive ? "Activo" : "Inactivo"}
-                            </Badge>
-                            <Badge variant={isComboValid(combo) ? "default" : "destructive"}>
-                              {isComboValid(combo) ? "Vigente" : "Vencido"}
-                            </Badge>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="kits" className="mt-6">
-              {filteredKits.length === 0 ? (
-                <Card>
-                  <CardContent className="flex flex-col items-center justify-center py-12">
-                    <div className="text-gray-500 text-center">
-                      <Package className="w-12 h-12 mx-auto mb-4" />
-                      <h3 className="text-lg font-medium mb-2">No hay kits</h3>
-                      <p className="text-sm">
-                        {searchTerm
-                          ? "No se encontraron kits con los filtros aplicados"
-                          : "Comienza creando tu primer kit"}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {filteredKits.map((kit) => (
-                    <Card key={kit.id} className="hover:shadow-lg transition-shadow border-blue-200">
-                      <CardHeader>
-                        <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              <Package className="w-5 h-5 text-blue-600" />
-                              <CardTitle className="text-lg">{kit.name}</CardTitle>
-                            </div>
-                            <CardDescription className="mt-1">{kit.description}</CardDescription>
-                          </div>
-                          <div className="flex gap-1 ml-2">
-                            {canUpdate && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => toggleKitStatus(kit.id, kit.isActive)}
-                                title={kit.isActive ? "Desactivar kit" : "Activar kit"}
-                              >
-                                {kit.isActive ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                              </Button>
-                            )}
-                            {canUpdate && (
-                              <Button variant="ghost" size="sm" onClick={() => handleEditKit(kit)} title="Editar kit">
-                                <Edit className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="space-y-3">
-                          <div className="text-center p-3 bg-blue-50 rounded-lg">
-                            <div className="text-2xl font-bold text-blue-600">Q{kit.price.toLocaleString()}</div>
-                            <div className="text-sm text-gray-600">{kit.products.length} productos fijos</div>
-                          </div>
-
-                          <div className="text-sm">
-                            <span className="text-gray-600">Productos incluidos:</span>
-                            <div className="mt-1 space-y-1">
-                              {kit.products.slice(0, 3).map((kitProduct) => {
-                                const product = products?.find((p) => p.id === kitProduct.productId)
-                                return (
-                                  <div key={kitProduct.productId} className="text-xs text-gray-500">
-                                    • {product?.name} (x{kitProduct.quantity})
-                                  </div>
-                                )
-                              })}
-                              {kit.products.length > 3 && (
-                                <div className="text-xs text-gray-500">
-                                  • Y {kit.products.length - 3} productos más...
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {(kit.restrictions.regions ||
-                            kit.restrictions.vendorIds ||
-                            kit.restrictions.customerCriteria?.channels) && (
-                            <div className="text-xs text-gray-500">
-                              <div className="font-medium mb-1">Restricciones:</div>
-                              {kit.restrictions.regions && <div>• Regiones: {kit.restrictions.regions.join(", ")}</div>}
-                              {kit.restrictions.customerCriteria?.channels && (
-                                <div>• Canales: {kit.restrictions.customerCriteria.channels.join(", ")}</div>
-                              )}
-                            </div>
-                          )}
-
-                          <div className="text-xs text-gray-500">
-                            <div>Válido desde: {new Date(kit.validFrom).toLocaleDateString()}</div>
-                            <div>Válido hasta: {new Date(kit.validTo).toLocaleDateString()}</div>
-                          </div>
-
-                          <div className="flex gap-2">
-                            <Badge variant={kit.isActive ? "default" : "secondary"}>
-                              {kit.isActive ? "Activo" : "Inactivo"}
-                            </Badge>
-                            <Badge variant={isKitValid(kit) ? "default" : "destructive"}>
-                              {isKitValid(kit) ? "Vigente" : "Vencido"}
-                            </Badge>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="offers" className="mt-6">
-              {filteredOffers.length === 0 ? (
-                <Card>
-                  <CardContent className="flex flex-col items-center justify-center py-12">
-                    <div className="text-gray-500 text-center">
-                      <Tag className="w-12 h-12 mx-auto mb-4" />
-                      <h3 className="text-lg font-medium mb-2">No hay ofertas</h3>
-                      <p className="text-sm">
-                        {searchTerm || typeFilter !== "all"
-                          ? "No se encontraron ofertas con los filtros aplicados"
-                          : "Comienza creando tu primera oferta"}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {filteredOffers.map((offer) => (
-                    <Card key={offer.id} className="hover:shadow-lg transition-shadow">
-                      <CardHeader>
-                        <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              <CardTitle className="text-lg">{offer.name}</CardTitle>
-                              {getOfferTypeBadge(offer.type)}
-                            </div>
-                            <CardDescription className="mt-1">{offer.description}</CardDescription>
-                          </div>
-                          <div className="flex gap-1 ml-2">
-                            {canUpdate && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => toggleOfferStatus(offer.id, offer.isActive)}
-                                title={offer.isActive ? "Desactivar oferta" : "Activar oferta"}
-                              >
-                                {offer.isActive ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                              </Button>
-                            )}
-                            {canUpdate && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleEditOffer(offer)}
-                                title="Editar oferta"
-                              >
-                                <Edit className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="space-y-3">
-                          {(offer.discountPercent || offer.discountAmount) && (
-                            <div className="text-center p-3 bg-red-50 rounded-lg">
-                              <div className="text-2xl font-bold text-red-600">
-                                {offer.discountPercent
-                                  ? `${offer.discountPercent}% OFF`
-                                  : `Q${offer.discountAmount?.toLocaleString()} OFF`}
-                              </div>
-                            </div>
-                          )}
-
-                          <div>
-                            <span className="text-sm text-gray-600">Productos incluidos:</span>
-                            <div className="text-sm font-medium">
-                              {offer.products?.length || 0} producto{(offer.products?.length || 0) !== 1 ? "s" : ""}
-                            </div>
-                          </div>
-
-                          <div className="text-xs text-gray-500">
-                            <div>Válido desde: {new Date(offer.validFrom).toLocaleDateString()}</div>
-                            <div>Válido hasta: {new Date(offer.validTo).toLocaleDateString()}</div>
-                          </div>
-
-                          <div className="flex gap-2">
-                            <Badge variant={offer.isActive ? "default" : "secondary"}>
-                              {offer.isActive ? "Activa" : "Inactiva"}
-                            </Badge>
-                            <Badge variant={isOfferValid(offer) ? "default" : "destructive"}>
-                              {isOfferValid(offer) ? "Vigente" : "Vencida"}
-                            </Badge>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-          </Tabs>
         </div>
-      </main>
+        <div className="flex flex-wrap items-center gap-4 text-sm text-slate-700">
+          <span className="font-medium text-slate-800">Modo de fecha:</span>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="modo-fecha"
+              checked={modoFecha === "inicio"}
+              onChange={() => setModoFecha("inicio")}
+              className="h-4 w-4 border-slate-300 text-emerald-600 focus:ring-emerald-500"
+            />
+            Filtrar por fecha de inicio
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="modo-fecha"
+              checked={modoFecha === "fin"}
+              onChange={() => setModoFecha("fin")}
+              className="h-4 w-4 border-slate-300 text-emerald-600 focus:ring-emerald-500"
+            />
+            Filtrar por fecha de finalización
+          </label>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-center">
+          <Select value={tipoSel} onValueChange={setTipoSel}>
+            <SelectTrigger>
+              <SelectValue placeholder="Tipo" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todos">Todos los tipos</SelectItem>
+              {Object.entries(TIPO_LABELS).map(([key, label]) => (
+                <SelectItem key={key} value={key}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-      {showOfferForm && (canCreate || canUpdate) && <OfferForm offer={editingOffer} onClose={handleOfferFormClose} />}
-      {showComboForm && (canCreate || canUpdate) && <ComboForm combo={editingCombo} onClose={handleComboFormClose} />}
-      {showKitForm && (canCreate || canUpdate) && <KitForm kit={editingKit} onClose={handleKitFormClose} />}
+          <Select value={estadoSel} onValueChange={setEstadoSel}>
+            <SelectTrigger>
+              <SelectValue placeholder="Estado" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todos">Todos los estados</SelectItem>
+              <SelectItem value="draft">Borrador</SelectItem>
+              <SelectItem value="active">Activa</SelectItem>
+              <SelectItem value="inactive">Inactiva</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setBusqueda("");
+              setTipoSel("todos");
+              setEstadoSel("todos");
+              setFechaDesde("");
+              setFechaHasta("");
+              setModoFecha("inicio");
+            }}
+          >
+            Limpiar
+          </Button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {ofertasFiltradas.length === 0 ? (
+            <div className="col-span-full text-center py-12 text-slate-500">
+              No hay ofertas creadas
+            </div>
+          ) : (
+            ofertasFiltradas.map((oferta) => {
+              const statusStyle = STATUS_COLORS[oferta.status] || STATUS_COLORS.draft;
+              const empresaNombre = EMPRESAS.find(e => e.codigo === oferta.codigoEmpresa)?.nombre || oferta.codigoEmpresa;
+
+              return (
+                <div
+                  key={oferta.id}
+                  className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden"
+                >
+                  <div className="p-5 space-y-3">
+                    {/* Header con título y acciones */}
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-lg font-semibold text-slate-900 line-clamp-2 flex-1">
+                        {oferta.name || "Sin título"}
+                      </h3>
+                      <div className="flex gap-1 flex-shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEditarOferta(oferta)}
+                          className="h-8 w-8 p-0 hover:bg-slate-100"
+                        >
+                          <Pencil className="h-4 w-4 text-slate-600" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEliminarOferta(oferta)}
+                          className="h-8 w-8 p-0 hover:bg-red-50"
+                        >
+                          <Trash2 className="h-4 w-4 text-red-600" />
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* Descripción */}
+                    {oferta.description && (
+                      <p className="text-sm text-slate-600 line-clamp-2">
+                        {oferta.description}
+                      </p>
+                    )}
+
+                    {/* Badges de información */}
+                    <div className="flex flex-wrap gap-2">
+                      <span className={cn(
+                        "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border",
+                        statusStyle.bg,
+                        statusStyle.text,
+                        statusStyle.border
+                      )}>
+                        <Tag className="h-3 w-3" />
+                        {TIPO_LABELS[oferta.type] || oferta.type}
+                      </span>
+
+                      <span className={cn(
+                        "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border capitalize",
+                        statusStyle.bg,
+                        statusStyle.text,
+                        statusStyle.border
+                      )}>
+                        {oferta.status === "draft" && "Borrador"}
+                        {oferta.status === "active" && "Activa"}
+                        {oferta.status === "inactive" && "Inactiva"}
+                      </span>
+                    </div>
+
+                    {/* Información adicional */}
+                    <div className="space-y-2 pt-2 border-t border-slate-100">
+                      <div className="flex items-center gap-2 text-xs text-slate-600">
+                        <Building2 className="h-3.5 w-3.5" />
+                        <span className="font-medium">{empresaNombre}</span>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-xs text-slate-600">
+                        <Calendar className="h-3.5 w-3.5" />
+                        <span>
+                          {formatDate(oferta.dates.validFrom)} → {formatDate(oferta.dates.validTo)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {editorOpen && (
+        <OfferEditorDialog
+          open={editorOpen}
+          draft={ofertaEditando}
+          onClose={() => {
+            setEditorOpen(false);
+            setOfertaEditando(null);
+          }}
+          onSave={handleGuardarOferta}
+          catalogs={catalogos}
+          catalogsLoading={catalogsLoading}
+          catalogsError={catalogsError}
+        />
+      )}
     </div>
-  )
+  );
 }
