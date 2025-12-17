@@ -46,7 +46,11 @@ export function CameraCapture({ onPhotoCapture, isOpen, onClose }: CameraCapture
       }
 
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" }, // Usar cámara trasera por defecto
+        video: { 
+          facingMode: "environment", // Usar cámara trasera por defecto
+          width: { ideal: 1920 }, // 🔒 Seguridad: Limitar resolución
+          height: { ideal: 1080 }
+        }
       })
       setStream(mediaStream)
       if (videoRef.current) {
@@ -88,12 +92,28 @@ export function CameraCapture({ onPhotoCapture, isOpen, onClose }: CameraCapture
       const video = videoRef.current
       const context = canvas.getContext("2d")
 
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
+      // 🔒 Seguridad: Limitar tamaño de imagen
+      const maxWidth = 1920;
+      const maxHeight = 1080;
+      let width = video.videoWidth;
+      let height = video.videoHeight;
+
+      if (width > maxWidth) {
+        height = (height * maxWidth) / width;
+        width = maxWidth;
+      }
+      if (height > maxHeight) {
+        width = (width * maxHeight) / height;
+        height = maxHeight;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
 
       if (context) {
-        context.drawImage(video, 0, 0)
-        const photoDataUrl = canvas.toDataURL("image/jpeg", 0.8)
+        context.drawImage(video, 0, 0, width, height)
+        // 🔒 Seguridad: Calidad reducida para menor tamaño
+        const photoDataUrl = canvas.toDataURL("image/jpeg", 0.7)
         setCapturedPhoto(photoDataUrl)
         stopCamera()
       }
@@ -103,11 +123,28 @@ export function CameraCapture({ onPhotoCapture, isOpen, onClose }: CameraCapture
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (file) {
+      // 🔒 Seguridad: Validar tipo y tamaño de archivo
+      const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+      const maxSize = 5 * 1024 * 1024; // 5MB
+
+      if (!validTypes.includes(file.type)) {
+        setError('Tipo de archivo no válido. Solo se permiten imágenes JPG, PNG o WebP.');
+        return;
+      }
+
+      if (file.size > maxSize) {
+        setError('El archivo es muy grande. Tamaño máximo: 5MB');
+        return;
+      }
+
       const reader = new FileReader()
       reader.onload = (e) => {
         const result = e.target?.result as string
         setCapturedPhoto(result)
         setError(null) // Limpiar error al subir archivo exitosamente
+      }
+      reader.onerror = () => {
+        setError('Error al leer el archivo');
       }
       reader.readAsDataURL(file)
     }

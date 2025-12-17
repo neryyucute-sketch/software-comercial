@@ -6,6 +6,18 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
+import { z } from "zod";
+
+// 🔒 Seguridad: Validación de credenciales
+const loginSchema = z.object({
+  username: z.string()
+    .min(3, "Usuario debe tener al menos 3 caracteres")
+    .max(50, "Usuario muy largo")
+    .regex(/^[a-zA-Z0-9_.-]+$/, "Usuario contiene caracteres inválidos"),
+  password: z.string()
+    .min(4, "Contraseña debe tener al menos 4 caracteres")
+    .max(100, "Contraseña muy larga"),
+});
 
 export default function LoginForm() {
   const { login, loading } = useAuth();
@@ -19,8 +31,16 @@ export default function LoginForm() {
     e.preventDefault();
     setError("");
 
+    // � Seguridad: Validar credenciales antes de enviar
+    const validation = loginSchema.safeParse({ username, password });
+    if (!validation.success) {
+      const firstError = validation.error.errors[0];
+      setError(firstError.message);
+      return;
+    }
+
     // 🔹 Mandamos usuario y clave al backend a través de AuthContext
-    const success = await login(username, password);
+    const success = await login(username.trim(), password);
 
     if (success) {
       router.push("/products"); // 👈 redirige si login OK

@@ -7,6 +7,23 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import type { Product } from "@/lib/types"
 import { X } from "lucide-react"
+import { z } from "zod"
+
+// 🔒 Seguridad: Validación con Zod
+const productSchema = z.object({
+  descripcion_corta: z.string().min(2, "Nombre muy corto").max(200, "Nombre muy largo"),
+  descripcion: z.string().min(5, "Descripción muy corta").max(1000, "Descripción muy larga"),
+  categoria: z.string().min(1, "Categoría requerida").max(100, "Categoría muy larga"),
+  price: z.number().min(0.01, "Precio debe ser mayor a 0").max(999999999, "Precio inválido"),
+  stock: z.number().min(0, "Stock no puede ser negativo").max(999999999, "Stock inválido"),
+  imageUrl: z.string().max(500, "URL de imagen muy larga"),
+  codigo_producto: z.string().max(50),
+  codigo_fabricante: z.string().max(50),
+  proveedor: z.string().max(200),
+  familia: z.string().max(100),
+  subfamilia: z.string().max(100),
+  presentacion: z.string().max(100),
+});
 
 type ProductPayload = Omit<Product, "id" | "createdAt">
 
@@ -52,26 +69,26 @@ export function ProductForm({ product, onClose, onSubmit }: ProductFormProps) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
-    // Validaciones mínimas
-    if (!formData.descripcion_corta.trim()) {
-      alert("La descripción corta (nombre) es requerida")
-      return
-    }
-    if (!formData.descripcion.trim()) {
-      alert("La descripción del producto es requerida")
-      return
-    }
-    if (!formData.categoria.trim()) {
-      alert("La categoría del producto es requerida")
-      return
-    }
-    if (formData.price <= 0) {
-      alert("El precio debe ser mayor a 0")
-      return
-    }
-    if (formData.stock < 0) {
-      alert("El stock no puede ser negativo")
-      return
+    // 🔒 Seguridad: Validación con Zod
+    const validation = productSchema.safeParse({
+      descripcion_corta: formData.descripcion_corta,
+      descripcion: formData.descripcion,
+      categoria: formData.categoria,
+      price: formData.price,
+      stock: formData.stock,
+      imageUrl: formData.imageUrl,
+      codigo_producto: formData.codigo_producto,
+      codigo_fabricante: formData.codigo_fabricante,
+      proveedor: formData.proveedor,
+      familia: formData.familia,
+      subfamilia: formData.subfamilia,
+      presentacion: formData.presentacion,
+    });
+
+    if (!validation.success) {
+      const firstError = validation.error.errors[0];
+      alert(firstError.message);
+      return;
     }
 
     // Normalización al shape de Product

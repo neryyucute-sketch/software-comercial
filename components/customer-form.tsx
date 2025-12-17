@@ -11,6 +11,25 @@ import { usePreventa } from "@/contexts/preventa-context"
 import { X } from "lucide-react"
 import type { Customer } from "@/lib/types"
 import { sampleRegions } from "@/lib/sample-data"
+import { z } from "zod"
+
+// 🔒 Seguridad: Validación robusta con Zod
+const customerSchema = z.object({
+  name: z.string().min(2, "Nombre debe tener al menos 2 caracteres").max(100, "Nombre muy largo"),
+  code: z.string().min(1, "Código requerido").max(50, "Código muy largo"),
+  nit: z.string().min(1, "NIT requerido").max(20, "NIT muy largo").regex(/^[0-9A-Z-]+$/, "NIT inválido"),
+  businessName: z.string().min(2, "Razón social requerida").max(200, "Razón social muy larga"),
+  email: z.string().email("Email inválido").or(z.literal("")),
+  phone: z.string().max(20, "Teléfono muy largo"),
+  address: z.string().max(500, "Dirección muy larga"),
+  tradeName: z.string().max(200, "Nombre comercial muy largo"),
+  contact: z.string().max(100, "Contacto muy largo"),
+  vendorId: z.string().min(1, "Debe seleccionar un vendedor"),
+  region: z.string().min(1, "Debe seleccionar una región"),
+  department: z.string().max(100),
+  municipality: z.string().max(100),
+  channel: z.string().min(1, "Debe seleccionar un canal"),
+})
 
 const sampleChannels = ["Mayorista", "Minorista", "Distribuidor", "Farmacia", "Supermercado", "Tienda", "Bodega"]
 
@@ -42,44 +61,12 @@ export function CustomerForm({ customer, onClose }: CustomerFormProps) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!formData.name.trim()) {
-      alert("El nombre del cliente es requerido")
-      return
-    }
-
-    if (!formData.code.trim()) {
-      alert("El código del cliente es requerido")
-      return
-    }
-
-    if (!formData.nit.trim()) {
-      alert("El NIT del cliente es requerido")
-      return
-    }
-
-    if (!formData.businessName.trim()) {
-      alert("La razón social es requerida")
-      return
-    }
-
-    if (!formData.vendorId) {
-      alert("Debe seleccionar un vendedor")
-      return
-    }
-
-    if (!formData.region) {
-      alert("Debe seleccionar una región")
-      return
-    }
-
-    if (!formData.channel) {
-      alert("Debe seleccionar un canal")
-      return
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (formData.email && !emailRegex.test(formData.email)) {
-      alert("Por favor ingresa un email válido")
+    // 🔒 Seguridad: Validación con Zod
+    const validation = customerSchema.safeParse(formData)
+    
+    if (!validation.success) {
+      const firstError = validation.error.errors[0]
+      alert(firstError.message)
       return
     }
 

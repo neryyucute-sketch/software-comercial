@@ -1,4 +1,8 @@
-const SECRET = "Cod$25%#.{}"; // 👈 clave fija, podrías moverla a .env
+// 🔒 Seguridad: SECRET ahora viene de variable de entorno
+const SECRET = process.env.NEXT_PUBLIC_CRYPTO_SECRET || "default-secret-change-me";
+
+// 🔒 Salt generado una vez por aplicación (mejorable con salt por usuario)
+const APP_SALT = process.env.NEXT_PUBLIC_CRYPTO_SALT || "default-salt-change-me";
 
 async function getKey() {
   const enc = new TextEncoder().encode(SECRET);
@@ -13,7 +17,7 @@ async function getKey() {
   return await crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: new TextEncoder().encode("codimisa-salt"), // 👈 otro valor fijo
+      salt: new TextEncoder().encode(APP_SALT),
       iterations: 100000,
       hash: "SHA-256",
     },

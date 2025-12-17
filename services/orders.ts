@@ -26,27 +26,34 @@ export async function syncOrderToServer(order: Order): Promise<{ ok: boolean; se
   try {
     const token = await getAccessTokenSafe();
 
+    // 🔒 Seguridad: Limitar longitud de notas
+    const sanitizedNotes = (order.notes ?? "").substring(0, 500);
+
     // Mapea si tu backend requiere otra forma
     const payload = {
       localId: order.localId,
       customerId: order.customerId,
-      discount: order.discount ?? 0,
+      discount: Math.max(0, Math.min(100, order.discount ?? 0)), // 0-100%
       total: order.total,
       createdAt: order.createdAt,
       items: order.items?.map((it) => ({
         productoId: it.productoId,
-        descripcion: it.descripcion,
-        cantidad: it.cantidad,
-        precioUnitario: it.precioUnitario,
-        subtotal: it.subtotal,
+        descripcion: it.descripcion.substring(0, 200),
+        cantidad: Math.max(0, it.cantidad),
+        precioUnitario: Math.max(0, it.precioUnitario),
+        subtotal: Math.max(0, it.subtotal),
         priceSource: it.priceSource ?? "base",
         comboId: it.comboId ?? null,
         kitId: it.kitId ?? null,
       })),
-      notes: order.notes ?? "",
-      photos: order.photos ?? [],
+      notes: sanitizedNotes,
+      photos: (order.photos ?? []).slice(0, 10), // 🔒 Máximo 10 fotos
       location: order.location ?? null,
     };
+
+    // 🔒 Seguridad: Timeout de 30 segundos
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     const res = await fetch(`${API}/pedidos`, {
       method: "POST",
@@ -56,7 +63,9 @@ export async function syncOrderToServer(order: Order): Promise<{ ok: boolean; se
         "Idempotency-Key": order.localId,
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
@@ -66,6 +75,10 @@ export async function syncOrderToServer(order: Order): Promise<{ ok: boolean; se
     const data = await res.json().catch(() => ({}));
     return { ok: true, serverId: data?.id ?? data?.serverId ?? null };
   } catch (e: any) {
+    // 🔒 Seguridad: Detectar timeout
+    if (e?.name === 'AbortError') {
+      return { ok: false, error: "Timeout: La petición tardó más de 30 segundos" };
+    }
     return { ok: false, error: e?.message ?? "Network error" };
   }
 }

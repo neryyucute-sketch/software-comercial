@@ -11,8 +11,9 @@ import { Card } from "@/components/ui/card";
 import { ProductSelectionModal } from "./modals/ProductSelectionModal";
 import { useOrders } from "@/contexts/OrdersContext";
 
+// 🔒 Seguridad: Usar crypto.randomUUID() nativo para IDs seguros
 function uuidSimple(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return crypto.randomUUID();
 }
 
 export default function OrderForm() {
@@ -95,7 +96,9 @@ export default function OrderForm() {
           placeholder="Notas del pedido (opcional)"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
+          maxLength={500}
         />
+        <span className="text-xs text-gray-500">{notes.length}/500 caracteres</span>
       </div>
 
       <div className="text-right">

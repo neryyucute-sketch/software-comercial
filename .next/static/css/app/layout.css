@@ -78,7 +78,6 @@
     --container-md: 28rem;
     --container-lg: 32rem;
     --container-2xl: 42rem;
-    --container-3xl: 48rem;
     --container-4xl: 56rem;
     --container-5xl: 64rem;
     --container-6xl: 72rem;
@@ -376,17 +375,11 @@
   .right-4 {
     right: calc(var(--spacing) * 4);
   }
-  .right-6 {
-    right: calc(var(--spacing) * 6);
-  }
   .-bottom-12 {
     bottom: calc(var(--spacing) * -12);
   }
   .bottom-0 {
     bottom: calc(var(--spacing) * 0);
-  }
-  .bottom-6 {
-    bottom: calc(var(--spacing) * 6);
   }
   .-left-12 {
     left: calc(var(--spacing) * -12);
@@ -577,9 +570,6 @@
   .hidden {
     display: none;
   }
-  .inline-block {
-    display: inline-block;
-  }
   .inline-flex {
     display: inline-flex;
   }
@@ -708,14 +698,8 @@
   .h-\[1\.15rem\] {
     height: 1.15rem;
   }
-  .h-\[80vh\] {
-    height: 80vh;
-  }
   .h-\[85dvh\] {
     height: 85dvh;
-  }
-  .h-\[90vh\] {
-    height: 90vh;
   }
   .h-\[300px\] {
     height: 300px;
@@ -764,12 +748,6 @@
   }
   .max-h-\[45vh\] {
     max-height: 45vh;
-  }
-  .max-h-\[50vh\] {
-    max-height: 50vh;
-  }
-  .max-h-\[60vh\] {
-    max-height: 60vh;
   }
   .max-h-\[90dvh\] {
     max-height: 90dvh;
@@ -1107,12 +1085,6 @@
   }
   .scroll-py-1 {
     scroll-padding-block: calc(var(--spacing) * 1);
-  }
-  .list-inside {
-    list-style-position: inside;
-  }
-  .list-disc {
-    list-style-type: disc;
   }
   .list-none {
     list-style-type: none;
@@ -1889,9 +1861,6 @@
   .text-\[11px\] {
     font-size: 11px;
   }
-  .text-\[14px\] {
-    font-size: 14px;
-  }
   .text-\[18px\] {
     font-size: 18px;
   }
@@ -1954,9 +1923,6 @@
   }
   .text-blue-100 {
     color: var(--color-blue-100);
-  }
-  .text-blue-500 {
-    color: var(--color-blue-500);
   }
   .text-blue-600 {
     color: var(--color-blue-600);
@@ -2044,9 +2010,6 @@
   }
   .text-purple-600 {
     color: var(--color-purple-600);
-  }
-  .text-purple-700 {
-    color: var(--color-purple-700);
   }
   .text-purple-800 {
     color: var(--color-purple-800);
@@ -3011,13 +2974,6 @@
     &:hover {
       @media (hover: hover) {
         color: var(--muted-foreground);
-      }
-    }
-  }
-  .hover\:text-primary {
-    &:hover {
-      @media (hover: hover) {
-        color: var(--primary);
       }
     }
   }
@@ -4482,16 +4438,6 @@
   .sm\:w-\[95vw\] {
     @media (width >= 40rem) {
       width: 95vw;
-    }
-  }
-  .sm\:max-w-2xl {
-    @media (width >= 40rem) {
-      max-width: var(--container-2xl);
-    }
-  }
-  .sm\:max-w-3xl {
-    @media (width >= 40rem) {
-      max-width: var(--container-3xl);
     }
   }
   .sm\:max-w-5xl {

@@ -1,4 +1,4 @@
-// File: C:\desarrollo_react\preventa\app\orders\page.tsx
+// File: C:\desarrollo_react\preventa\software-comercial\app\orders\page.tsx
 import * as entry from '../../../../app/orders/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

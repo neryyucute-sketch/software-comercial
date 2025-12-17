@@ -5,10 +5,11 @@ import { Tokens } from "../lib/types";
 const TOKEN_KEY = "session"; // clave fija en IndexedDB
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+// 🔒 Seguridad: Limitar información expuesta del dispositivo
 function getDeviceInfo() {
   const ua = navigator.userAgent;
-  let os = "Unknown OS";
-  let browser = "Unknown Browser";
+  let os = "Unknown";
+  let browser = "Unknown";
 
   if (ua.indexOf("Win") !== -1) os = "Windows";
   else if (ua.indexOf("Mac") !== -1) os = "MacOS";
@@ -21,7 +22,20 @@ function getDeviceInfo() {
   else if (ua.indexOf("Firefox") !== -1) browser = "Firefox";
   else if (ua.indexOf("Edg") !== -1) browser = "Edge";
 
-  return { os, browser, userAgent: ua };
+  // 🔒 No exponer userAgent completo, solo hash
+  const uaHash = crypto.subtle ? hashString(ua) : "legacy";
+  return { os, browser, uaHash };
+}
+
+// Hash simple para userAgent
+function hashString(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 export async function getOrCreateDeviceId(): Promise<string> {
@@ -37,7 +51,7 @@ export async function getOrCreateDeviceId(): Promise<string> {
       uuid: crypto.randomUUID(),
       os: info.os,
       browser: info.browser,
-      userAgent: info.userAgent,
+      uaHash: info.uaHash, // 🔒 Solo hash, no userAgent completo
       createdAt: new Date().toISOString(),
     };
 
@@ -81,33 +95,51 @@ export async function clearTokens() {
 }
 
 /** 🔹 Refrescar token */
-async function refreshToken(refreshToken: string): Promise<Tokens> {
-  const res = await fetch(`${API_BASE}/auth/refresh`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${refreshToken}` },
-  });
+async function refreshToken(refreshToken: string, retries = 3): Promise<Tokens> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${refreshToken}` },
+    });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error("Error al refrescar token: " + JSON.stringify(data));
+    const data = await res.json();
+    
+    if (!res.ok) {
+      // 🔒 Seguridad: Si el refresh falla, limpiar sesión
+      if (res.status === 401 || res.status === 403) {
+        await clearTokens();
+        throw new Error("Sesión expirada. Por favor, inicia sesión nuevamente.");
+      }
+      throw new Error("Error al refrescar token: " + JSON.stringify(data));
+    }
 
-  const expiresIn = 15 * 60 * 1000;
+    const expiresIn = 15 * 60 * 1000;
 
-  const tokens: Tokens = {
-    id:TOKEN_KEY,
-    accessToken: await encryptData(data.accessToken), 
-    refreshToken:await encryptData(data.refreshToken),
-    expiresAt: Date.now() + expiresIn,
-    usuarioConfiguracion: data.usuarioConfiguracionList
-  };
+    const tokens: Tokens = {
+      id:TOKEN_KEY,
+      accessToken: await encryptData(data.accessToken), 
+      refreshToken:await encryptData(data.refreshToken),
+      expiresAt: Date.now() + expiresIn,
+      usuarioConfiguracion: data.usuarioConfiguracionList
+    };
 
-  await saveTokens(tokens);
-  return {
-    id:TOKEN_KEY,
-    accessToken: await decryptData(tokens.accessToken),
-    refreshToken: await decryptData(tokens.refreshToken ?? ""), // 👈 fallback string vacío
-    expiresAt: tokens.expiresAt,
-    usuarioConfiguracion: tokens.usuarioConfiguracion,
-  };
+    await saveTokens(tokens);
+    return {
+      id:TOKEN_KEY,
+      accessToken: await decryptData(tokens.accessToken),
+      refreshToken: await decryptData(tokens.refreshToken ?? ""), // 👈 fallback string vacío
+      expiresAt: tokens.expiresAt,
+      usuarioConfiguracion: tokens.usuarioConfiguracion,
+    };
+  } catch (error) {
+    // 🔒 Retry logic para errores de red
+    if (retries > 0 && !(error instanceof Error && error.message.includes("Sesión expirada"))) {
+      console.warn(`Reintentando refresh token... (intentos restantes: ${retries})`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return refreshToken(refreshToken, retries - 1);
+    }
+    throw error;
+  }
 }
 
 /** 🔹 Obtener accessToken válido (renueva si expiró) */

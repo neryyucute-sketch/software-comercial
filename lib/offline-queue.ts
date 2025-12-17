@@ -1,5 +1,7 @@
 "use client"
 
+import { db } from "./db"
+
 interface QueueItem {
   id: string
   type: "order" | "customer" | "product"
@@ -15,7 +17,7 @@ class OfflineQueue {
 
   async addToQueue(type: QueueItem["type"], data: any) {
     const item: QueueItem = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(), // 🔒 Seguridad: UUID seguro
       type,
       data,
       timestamp: new Date(),
@@ -23,7 +25,7 @@ class OfflineQueue {
     }
 
     this.queue.push(item)
-    this.saveQueue()
+    await this.saveQueue() // 🔒 Seguridad: usar IndexedDB
 
     // Try to process immediately if online
     if (navigator.onLine) {
@@ -31,14 +33,26 @@ class OfflineQueue {
     }
   }
 
-  private saveQueue() {
-    localStorage.setItem("syncQueue", JSON.stringify(this.queue))
+  // 🔒 Seguridad: Guardar en IndexedDB en lugar de localStorage
+  private async saveQueue() {
+    try {
+      // Usar tabla temporal en IndexedDB
+      const queueData = { id: "syncQueue", items: this.queue };
+      await db.table("auth").put(queueData);
+    } catch (error) {
+      console.error("Error guardando cola de sincronización:", error);
+    }
   }
 
-  private loadQueue() {
-    const saved = localStorage.getItem("syncQueue")
-    if (saved) {
-      this.queue = JSON.parse(saved)
+  private async loadQueue() {
+    try {
+      const saved = await db.table("auth").get("syncQueue");
+      if (saved && saved.items) {
+        this.queue = saved.items;
+      }
+    } catch (error) {
+      console.error("Error cargando cola de sincronización:", error);
+      this.queue = [];
     }
   }
 

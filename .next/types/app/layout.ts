@@ -1,4 +1,4 @@
-// File: C:\desarrollo_react\preventa\app\layout.tsx
+// File: C:\desarrollo_react\preventa\software-comercial\app\layout.tsx
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
