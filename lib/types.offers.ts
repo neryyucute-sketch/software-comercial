@@ -53,6 +53,17 @@ export type ComboPackConfig = {
   itemsVariablesPermitidos: ComboVariableItem[];
 };
 
+export type PriceListProductOverride = {
+  productId: string;
+  price?: number | null;
+  description?: string;
+  basePrice?: number | null;
+};
+
+export type PriceListConfig = {
+  products: PriceListProductOverride[];
+};
+
 export type OfferScope = {
   canales?: string[];
   subCanales?: string[];
@@ -61,6 +72,7 @@ export type OfferScope = {
   codigosProveedor?: string[];  
   departamentos?: string[];
   vendedores?: string[];
+  tiposVendedor?: string[];
   regiones?: string[];
   codigosLinea?: string[];
   codigosFamilia?: string[];
@@ -86,9 +98,11 @@ export type OfferDef = {
   proveedores?: string[];
   // Permite combinar con otras ofertas que impactan el mismo producto
   stackableWithSameProduct?: boolean;
+  priority?: number | null;
   discount?: DiscountConfig;
   bonus?: BonusConfig;
   pack?: ComboPackConfig;
+  priceList?: PriceListConfig;
   version?: number;
   createdAt?: string;
   createdBy?: string;

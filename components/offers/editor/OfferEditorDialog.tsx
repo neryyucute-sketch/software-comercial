@@ -47,6 +47,80 @@ interface OfferEditorDialogProps {
 }
 
 
+type ScopeCategory = "client" | "subcanal" | "canal" | "region" | "vendor" | "general";
+
+type ScopeDescriptor = {
+  category: ScopeCategory;
+  identifiers: string[];
+};
+
+const normalizeList = (values?: Array<string | null | undefined>): string[] => {
+  if (!Array.isArray(values)) return [];
+  const set = new Set<string>();
+  values.forEach((val) => {
+    if (val == null) return;
+    const normalized = String(val).trim();
+    if (!normalized) return;
+    set.add(normalized.toUpperCase());
+  });
+  return [...set];
+};
+
+const resolveScopeDescriptor = (offer: OfferDef): ScopeDescriptor => {
+  const scope = offer.scope ?? {};
+  const clienteCodes = normalizeList(scope.codigosCliente as string[] | undefined);
+  if (clienteCodes.length) {
+    return { category: "client", identifiers: clienteCodes };
+  }
+
+  const subChannels = normalizeList(scope.subCanales as string[] | undefined);
+  if (subChannels.length) {
+    return { category: "subcanal", identifiers: subChannels };
+  }
+
+  const channels = normalizeList(scope.canales as string[] | undefined);
+  if (channels.length) {
+    return { category: "canal", identifiers: channels };
+  }
+
+  const regions = normalizeList([...(scope.regiones ?? []), ...(scope.departamentos ?? [])]);
+  if (regions.length) {
+    return { category: "region", identifiers: regions };
+  }
+
+  const vendors = normalizeList([...(scope.vendedores ?? []), ...((scope.tiposVendedor ?? []) as string[])]);
+  if (vendors.length) {
+    return { category: "vendor", identifiers: vendors };
+  }
+
+  return { category: "general", identifiers: ["*"] };
+};
+
+const shareIdentifier = (left: string[], right: string[]): boolean => {
+  if (!left.length || !right.length) return false;
+  if (left.includes("*") || right.includes("*")) return true;
+  const leftSet = new Set(left.map((v) => v.toUpperCase()));
+  return right.some((value) => leftSet.has(value.toUpperCase()));
+};
+
+const formatScopeCategory = (category: ScopeCategory): string => {
+  switch (category) {
+    case "client":
+      return "un cliente específico";
+    case "subcanal":
+      return "un subcanal";
+    case "canal":
+      return "un canal";
+    case "region":
+      return "una región";
+    case "vendor":
+      return "un vendedor";
+    default:
+      return "todas las ventas";
+  }
+};
+
+
 
 export function OfferEditorDialog({
   open,
@@ -67,6 +141,9 @@ export function OfferEditorDialog({
     const normalizedCode = (draft.referenceCode || "").trim().toUpperCase();
     const hasCode = Boolean(normalizedCode);
     const isPackOffer = draft.type === "combo" || draft.type === "kit";
+    const offersArr = Array.isArray(existingOffers) ? existingOffers : [];
+    const normalizedPriority = Number.isFinite(Number(draft.priority)) ? Number(draft.priority) : 5;
+    draft.priority = normalizedPriority;
 
     if (isPackOffer && !hasCode) {
       toast({
@@ -78,7 +155,6 @@ export function OfferEditorDialog({
     }
 
     if (hasCode) {
-      const offersArr = Array.isArray(existingOffers) ? existingOffers : [];
       const duplicate = offersArr.some((offer) => {
         if (!offer.referenceCode) return false;
         const offerCode = offer.referenceCode.trim().toUpperCase();
@@ -140,6 +216,60 @@ export function OfferEditorDialog({
         everyN,
         givesM,
       } as any;
+    }
+
+    if (draft.type === "pricelist") {
+      const negotiatedProducts = draft.priceList?.products ?? [];
+      if (!negotiatedProducts.length) {
+        toast({
+          title: "Agrega productos",
+          description: "Las listas negociadas necesitan al menos un producto con precio definido.",
+          variant: "default",
+        });
+        return;
+      }
+      const missingPrice = negotiatedProducts.some((item) => {
+        const value = Number(item.price);
+        return Number.isNaN(value) || value <= 0;
+      });
+      if (missingPrice) {
+        toast({
+          title: "Precio requerido",
+          description: "Completa el precio negociado para cada producto seleccionado.",
+          variant: "default",
+        });
+        return;
+      }
+
+      const candidateDescriptor = resolveScopeDescriptor(draft);
+      const candidateCompany = (draft.codigoEmpresa ?? "").trim().toUpperCase();
+      const conflict = offersArr
+        .filter((offer) => offer && offer.type === "pricelist")
+        .filter((offer) => !offer.deleted)
+        .filter((offer) => (offer.serverId || offer.id) !== (draft.serverId || draft.id))
+        .filter((offer) => {
+          if (!candidateCompany) return true;
+          const otherCompany = (offer.codigoEmpresa ?? "").trim().toUpperCase();
+          return !otherCompany || otherCompany === candidateCompany;
+        })
+        .map((offer) => ({
+          offer,
+          descriptor: resolveScopeDescriptor(offer),
+          priority: Number.isFinite(Number(offer.priority)) ? Number(offer.priority) : 5,
+        }))
+        .find((entry) =>
+          entry.priority === normalizedPriority &&
+          entry.descriptor.category === candidateDescriptor.category &&
+          shareIdentifier(entry.descriptor.identifiers, candidateDescriptor.identifiers)
+        );
+
+      if (conflict) {
+        toast({
+          title: "Prioridad duplicada",
+          description: `Ya existe una lista con prioridad ${normalizedPriority} para ${formatScopeCategory(candidateDescriptor.category)} (${conflict.offer.name || conflict.offer.codigoOferta || conflict.offer.id}). Ajusta la prioridad si deseas que esta lista prevalezca.`,
+          variant: "default",
+        });
+      }
     }
 
     if (draft.type === "combo" || draft.type === "kit") {

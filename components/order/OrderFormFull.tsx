@@ -326,6 +326,65 @@ function peekTempOrderNumber(vendorCode: string, serie?: string, companyCode?: s
 const asId = (v?: string | number | null) => (v ?? '').toString().trim().toLowerCase().replace(/\s+/g, '_');
 const normalizeCompanyId = (value?: string | null) => (value ?? 'general').toString().trim().toLowerCase();
 
+type PriceListScopeCategory = "client" | "subcanal" | "canal" | "vendor" | "region" | "general";
+
+type PriceListScopeSummary = {
+  category: PriceListScopeCategory;
+  rank: number;
+};
+
+const parseOfferPriority = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 5;
+};
+
+const parseOfferUpdatedAt = (offer: OfferDef): number => {
+  const updated = Date.parse(offer.updatedAt ?? "");
+  if (!Number.isNaN(updated)) return updated;
+  const created = Date.parse((offer as any)?.createdAt ?? "");
+  if (!Number.isNaN(created)) return created;
+  const validFrom = Date.parse(offer.dates?.validFrom ?? "");
+  if (!Number.isNaN(validFrom)) return validFrom;
+  return 0;
+};
+
+const scopeHasValues = (values?: unknown): boolean => {
+  if (Array.isArray(values)) {
+    return values.some((value) => {
+      if (value === null || value === undefined) return false;
+      const normalized = String(value).trim();
+      return normalized.length > 0;
+    });
+  }
+  if (typeof values === "string") {
+    return values
+      .split(",")
+      .map((chunk) => chunk.trim())
+      .some((chunk) => chunk.length > 0);
+  }
+  return false;
+};
+
+const resolvePriceListScope = (offer: OfferDef): PriceListScopeSummary => {
+  const scope = offer.scope ?? {};
+  if (scopeHasValues(scope.codigosCliente)) {
+    return { category: "client", rank: 1 };
+  }
+  if (scopeHasValues(scope.subCanales)) {
+    return { category: "subcanal", rank: 2 };
+  }
+  if (scopeHasValues(scope.canales)) {
+    return { category: "canal", rank: 3 };
+  }
+  if (scopeHasValues(scope.vendedores) || scopeHasValues((scope as any).tiposVendedor)) {
+    return { category: "vendor", rank: 4 };
+  }
+  if (scopeHasValues(scope.regiones) || scopeHasValues(scope.departamentos)) {
+    return { category: "region", rank: 5 };
+  }
+  return { category: "general", rank: 6 };
+};
+
 type ClienteLite = {
   codigoCliente: string;
   nombreCliente: string;
@@ -336,6 +395,36 @@ type ClienteLite = {
   lista_precio?: string | null;
   listaPrecioCodigo?: string | null;
   priceListCode?: string | null;
+};
+
+type NegotiatedPriceEntry = {
+  price: number;
+  offerId?: string;
+  offerName?: string;
+  offerCode?: string | null;
+  priority: number;
+  scopeRank: number;
+  scopeCategory: PriceListScopeCategory;
+  updatedAt?: number;
+};
+
+const shouldOverrideNegotiatedPrice = (
+  current: NegotiatedPriceEntry | undefined,
+  candidate: NegotiatedPriceEntry,
+) => {
+  if (!current) return true;
+  if (candidate.scopeRank < current.scopeRank) return true;
+  if (candidate.scopeRank > current.scopeRank) return false;
+
+  if (candidate.priority < current.priority) return true;
+  if (candidate.priority > current.priority) return false;
+
+  const priceDiff = candidate.price - current.price;
+  if (Math.abs(priceDiff) > 0.0001) {
+    return priceDiff < 0;
+  }
+
+  return (candidate.updatedAt ?? 0) > (current.updatedAt ?? 0);
 };
 
 type OrderPayload = Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> & {
@@ -352,6 +441,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
   const { priceLists, syncPriceLists } = usePreventa();
 
   const [customer, setCustomer] = useState<ClienteLite | null>(null);
+  const [customerDetails, setCustomerDetails] = useState<Cliente | null>(null);
   const [items, setItems] = useState<OrderItem[]>([]);
   const [discount, setDiscount] = useState<number>(0);
   const [notes, setNotes] = useState<string>("");
@@ -640,6 +730,29 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     recalcItemsWithOffer(filtered);
   }, [items, recalcItemsWithOffer]);
 
+  const { user } = useAuth();
+
+  const vendorCode = useMemo(() => {
+    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR");
+    return (entry?.valor as string) || "";
+  }, [user]);
+
+  const defaultWarehouse = useMemo(() => {
+    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "BODEGA_DESPACHO")
+      || user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "BODEGA" || i.configuracion === "CODIGO_BODEGA");
+    return (entry?.valor as string) || "";
+  }, [user]);
+
+  const companyCode = useMemo(() => {
+    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR");
+    return (entry?.codigoEmpresa as string) || "E01";
+  }, [user]);
+
+  const orderSeries = useMemo(() => {
+    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "SERIE PEDIDO" || i.configuracion === "SERIE_PEDIDO");
+    return (entry?.valor as string) || undefined;
+  }, [user]);
+
   const existingItems = useMemo(
     () => items.reduce<Record<string, number>>((acc, it) => {
         if (it.comboId || it.kitId || it.comboCode || it.comboType === "combo" || it.comboType === "kit") {
@@ -652,6 +765,127 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     );  
 
   const selectedCount = useMemo(() => items.reduce((acc, it) => acc + (it.cantidad || 0), 0), [items]);
+
+  const negotiatedPriceMap = useMemo(() => {
+    if (!customer) return {} as Record<string, NegotiatedPriceEntry>;
+    const scopeCustomer = (customerDetails as Cliente | null) ?? (customer as any) ?? null;
+    if (!scopeCustomer) return {} as Record<string, NegotiatedPriceEntry>;
+
+    const today = new Date();
+    const normalizedCompany = companyCode ? normalizeCompanyId(companyCode) : null;
+    const output: Record<string, NegotiatedPriceEntry> = {};
+
+    for (const offer of allOffers) {
+      if (!offer) continue;
+      const offerType = (offer.type || "").toString().toLowerCase();
+      if (offerType !== "pricelist") continue;
+      if (offer.deleted) continue;
+      if (!isOfferActive(offer.status)) continue;
+      if (!isOfferInDateRange(offer, today)) continue;
+
+      if (offer.codigoEmpresa) {
+        const offerCompany = normalizeCompanyId(offer.codigoEmpresa);
+        if (normalizedCompany && offerCompany && normalizedCompany !== offerCompany) {
+          continue;
+        }
+      }
+
+      if (!matchesOfferScope(offer, scopeCustomer, { skipCustomerCodes: false })) continue;
+
+      const overrides = offer.priceList?.products ?? [];
+      if (!Array.isArray(overrides) || overrides.length === 0) continue;
+
+      for (const entry of overrides) {
+        const pidRaw = entry?.productId;
+        if (pidRaw === undefined || pidRaw === null) continue;
+        const pid = String(pidRaw).trim();
+        if (!pid) continue;
+        const price = Number(entry?.price);
+        if (!Number.isFinite(price)) continue;
+
+        const offerCode = pickReferenceCode(
+          offer.codigoOferta,
+          offer.referenceCode,
+          (offer as any)?.codigoOferta,
+          (offer as any)?.codigoReferencia,
+          offer.serverId,
+          offer.id
+        );
+
+        const scopeSummary = resolvePriceListScope(offer);
+        const candidate: NegotiatedPriceEntry = {
+          price,
+          offerId: offer.id || offer.serverId,
+          offerName: offer.name || offer.description || "Lista negociada",
+          offerCode: offerCode ?? null,
+          priority: parseOfferPriority(offer.priority),
+          scopeRank: scopeSummary.rank,
+          scopeCategory: scopeSummary.category,
+          updatedAt: parseOfferUpdatedAt(offer),
+        };
+
+        if (!shouldOverrideNegotiatedPrice(output[pid], candidate)) {
+          continue;
+        }
+
+        output[pid] = candidate;
+      }
+    }
+
+    return output;
+  }, [customer, customerDetails, allOffers, companyCode]);
+
+  useEffect(() => {
+    if (!customer) return;
+    if (!items.length) return;
+    const overrideKeys = Object.keys(negotiatedPriceMap || {});
+    if (!overrideKeys.length) return;
+
+    let changed = false;
+    const updated = items.map((item) => {
+      if (item.comboId || item.kitId || item.esBonificacion) return item;
+      const pid = String(item.productoId ?? "").trim();
+      if (!pid) return item;
+      const override = negotiatedPriceMap[pid];
+      if (!override) {
+        return item;
+      }
+
+      const negotiatedUnit = Number(override.price);
+      if (!Number.isFinite(negotiatedUnit)) return item;
+
+      const targetSubtotal = Math.round(item.cantidad * negotiatedUnit * 100) / 100;
+      const samePrice = Math.abs((item.precioUnitario ?? 0) - negotiatedUnit) < 0.001;
+      const sameSource = item.priceSource === "negotiated";
+      const sameName = (item.priceListName || "") === (override.offerName || item.priceListName || "");
+      const sameCode = (item.priceListCode || "") === (override.offerCode || item.priceListCode || "");
+
+      if (samePrice && sameSource && sameName && sameCode) {
+        return item;
+      }
+
+      changed = true;
+      return {
+        ...item,
+        precioUnitario: negotiatedUnit,
+        subtotal: targetSubtotal,
+        subtotalSinDescuento: targetSubtotal,
+        total: targetSubtotal,
+        descuentoLinea: undefined,
+        priceSource: "negotiated",
+        priceListName: override.offerName ?? "Precio negociado",
+        priceListCode: override.offerCode ?? item.priceListCode ?? undefined,
+        ofertaCodigo: override.offerCode ?? item.ofertaCodigo ?? null,
+        ofertaIdAplicada: override.offerId ?? item.ofertaIdAplicada ?? undefined,
+        ofertaNombre: override.offerName ?? item.ofertaNombre ?? "Precio negociado",
+        tipoOferta: "pricelist",
+      } as OrderItem;
+    });
+
+    if (changed) {
+      recalcItemsWithOffer(updated);
+    }
+  }, [customer, items, negotiatedPriceMap]);
 
   useEffect(() => {
     const draft = {
@@ -675,29 +909,6 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     };
     localStorage.setItem("pedido_draft", JSON.stringify(draft));
   }, [customer, items, discount, notes, photos, location, purchaseOrder, customerAddress, customerDept, customerMunicipio, customerContact, customerPhone, paymentMethod, warehouse, selectedAddressId, summaryOpen, appliedOffers]);
-
-  const { user } = useAuth();
-
-  const vendorCode = useMemo(() => {
-    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR");
-    return (entry?.valor as string) || "";
-  }, [user]);
-
-  const defaultWarehouse = useMemo(() => {
-    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "BODEGA_DESPACHO")
-      || user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "BODEGA" || i.configuracion === "CODIGO_BODEGA");
-    return (entry?.valor as string) || "";
-  }, [user]);
-
-  const companyCode = useMemo(() => {
-    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR");
-    return (entry?.codigoEmpresa as string) || "E01";
-  }, [user]);
-
-  const orderSeries = useMemo(() => {
-    const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "SERIE PEDIDO" || i.configuracion === "SERIE_PEDIDO");
-    return (entry?.valor as string) || undefined;
-  }, [user]);
 
   const ensurePriceLists = useCallback(
     async (targetCompany?: string | null) => {
@@ -917,10 +1128,14 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
   };
 
   useEffect(() => {
-    if (!customer) return;
+    if (!customer) {
+      setCustomerDetails(null);
+      return;
+    }
     (async () => {
       const c = await db.clientes.where("codigoCliente").equals(customer.codigoCliente).first();
       if (c) {
+        setCustomerDetails(c as Cliente);
         setCustomer((prev) => {
           if (!prev) return prev;
           let changed = false;
@@ -976,6 +1191,8 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         if (diasCred && Number(diasCred) > 1) {
           setPaymentMethod("Credito");
         }
+      } else {
+        setCustomerDetails(null);
       }
     })();
   }, [customer, selectedAddressId]);
@@ -1708,25 +1925,37 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
 
                   {normalItems.map((it) => {
                     const isBonus = !!it.esBonificacion;
+                    const isNegotiated = !isBonus && (it.priceSource === "negotiated" || it.tipoOferta === "pricelist");
                     const canDecrease = it.cantidad > 1 && !isBonus; // evitamos bajar/romper bonificaciones
+                    const appearanceClass = isBonus
+                      ? "bg-amber-50 border-amber-200 dark:bg-amber-900/15 dark:border-amber-800"
+                      : isNegotiated
+                        ? "bg-emerald-50 border-emerald-200 dark:bg-emerald-900/20 dark:border-emerald-700"
+                        : "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800";
                     return (
                       <div
                         key={it.id}
-                        className={`grid grid-cols-12 gap-2 items-center border rounded-lg p-2 shadow-sm ${
-                          isBonus ? 'bg-amber-50 border-amber-200 dark:bg-amber-900/15 dark:border-amber-800' : 'bg-yellow-50 dark:bg-yellow-900/20'
-                        }`}
+                        className={`grid grid-cols-12 gap-2 items-center border rounded-lg p-2 shadow-sm ${appearanceClass}`}
                       >
                         <div className="col-span-5 space-y-1">
                           <div className="font-medium flex items-center gap-2">
-                            {isBonus ? (
+                            {isBonus && (
                               <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50">Boni</Badge>
-                            ) : null}
+                            )}
+                            {isNegotiated && (
+                              <Badge variant="outline" className="border-emerald-400 text-emerald-700 bg-emerald-50">Negociado</Badge>
+                            )}
                             <span>{it.descripcion}</span>
                           </div>
-                          <div className="text-xs text-muted-foreground">
+                          <div className={`text-xs ${isNegotiated ? "text-emerald-700 font-semibold" : "text-muted-foreground"}`}>
                             Precio: Q{it.precioUnitario.toFixed(2)}
                           </div>
-                          <div className="text-[11px] text-muted-foreground">
+                          {isNegotiated && it.priceListName && (
+                            <div className="text-[11px] text-emerald-600">
+                              Lista: {it.priceListName}
+                            </div>
+                          )}
+                          <div className={`text-[11px] ${isNegotiated ? "text-emerald-600" : "text-muted-foreground"}`}>
                             Bruto: Q{(it.subtotalSinDescuento ?? it.cantidad * it.precioUnitario).toFixed(2)}
                             {it.descuentoLinea ? ` · Desc: Q${it.descuentoLinea.toFixed(2)}` : ""}
                             {it.descuentoLinea ? ` · Neto: Q${(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}` : ""}
@@ -2057,15 +2286,26 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                           const descuento = it.descuentoLinea ?? 0;
                           const neto = it.subtotal ?? bruto;
                           const isBonus = !!it.esBonificacion;
-                          const badgeLabel = isBonus ? "Boni" : descuento > 0 ? "Desc" : undefined;
+                          const isNegotiated = !isBonus && (it.priceSource === "negotiated" || it.tipoOferta === "pricelist");
+                          const badgeLabel = isBonus ? "Boni" : isNegotiated ? "Neg" : descuento > 0 ? "Desc" : undefined;
+                          const badgeClass = isBonus
+                            ? "border-amber-400 text-amber-700 bg-amber-50"
+                            : isNegotiated
+                              ? "border-emerald-400 text-emerald-700 bg-emerald-50"
+                              : "border-blue-300 text-blue-700 bg-blue-50";
+                          const rowHighlight = isBonus
+                            ? "bg-amber-50/80 dark:bg-amber-900/10"
+                            : isNegotiated
+                              ? "bg-emerald-50/70 dark:bg-emerald-900/15"
+                              : "";
                           return (
                             <div
                               key={it.id}
-                              className={`grid grid-cols-12 gap-2 px-3 py-2 text-sm ${isBonus ? 'bg-amber-50/80 dark:bg-amber-900/10' : ''}`}
+                              className={`grid grid-cols-12 gap-2 px-3 py-2 text-sm ${rowHighlight}`}
                             >
                               <div className="col-span-5 font-medium text-foreground truncate flex items-center gap-2">
                                 {badgeLabel ? (
-                                  <Badge variant="outline" className={isBonus ? 'border-amber-400 text-amber-700 bg-amber-50' : 'border-blue-300 text-blue-700 bg-blue-50'}>
+                                  <Badge variant="outline" className={badgeClass}>
                                     {badgeLabel}
                                   </Badge>
                                 ) : null}
@@ -2120,6 +2360,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         customer={customer}
         priceLists={priceLists}
         companyId={companyCode}
+        negotiatedPrices={negotiatedPriceMap}
         />
 
         <ComboSelectionModal
@@ -2446,7 +2687,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
             onClose();
           }}
         >
-          Sí,
+          Sí, Continuar
         </Button>
       </div>
     </div>

@@ -14,6 +14,11 @@ function normalizeOffer(offer: OfferDef | null): OfferDef | null {
   return {
     ...offer,
     stackableWithSameProduct: offer.stackableWithSameProduct ?? false,
+    priority: Number.isFinite(Number(offer.priority)) ? Number(offer.priority) : 5,
+    priceList:
+      offer.type === "pricelist"
+        ? { products: offer.priceList?.products ?? [] }
+        : undefined,
   };
 }
 

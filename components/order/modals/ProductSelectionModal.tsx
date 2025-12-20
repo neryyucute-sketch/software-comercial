@@ -103,12 +103,35 @@ function PickerCarousel({
   );
 }
 
+type NegotiatedPriceInfo = {
+  price: number;
+  offerId?: string;
+  offerName?: string;
+  offerCode?: string | null;
+  priority?: number;
+  scopeCategory?: string;
+};
+
 type PriceInfo = {
   price: number;
-  source: "lista" | "default" | "base";
+  source: "lista" | "default" | "base" | "negotiated";
   listName?: string;
   listId?: string;
   listCode?: string;
+  offerId?: string;
+  offerName?: string;
+  offerCode?: string | null;
+  priority?: number;
+  scopeCategory?: string;
+};
+
+const NEGOTIATED_SCOPE_LABELS: Record<string, string> = {
+  client: "Cliente",
+  subcanal: "Subcanal",
+  canal: "Canal",
+  vendor: "Vendedor",
+  region: "Región",
+  general: "General",
 };
 
 type CustomerPriceContext = {
@@ -126,8 +149,27 @@ function getCustomerPrice(
   product: Product,
   customer: CustomerPriceContext | null,
   priceLists: PriceList[],
-  companyId: string
+  companyId: string,
+  negotiated?: Record<string, NegotiatedPriceInfo>
 ): PriceInfo {
+  const productKey = String(product.codigoProducto ?? "").trim();
+
+  const negotiatedEntry = productKey && negotiated ? negotiated[productKey] : undefined;
+  if (negotiatedEntry && Number.isFinite(negotiatedEntry.price)) {
+    const price = Number(negotiatedEntry.price);
+    return {
+      price,
+      source: "negotiated",
+      listName: negotiatedEntry.offerName ?? "Precio negociado",
+      listCode: negotiatedEntry.offerCode ?? undefined,
+      offerId: negotiatedEntry.offerId,
+      offerName: negotiatedEntry.offerName ?? "Precio negociado",
+      offerCode: negotiatedEntry.offerCode ?? undefined,
+      priority: typeof negotiatedEntry.priority === "number" ? negotiatedEntry.priority : undefined,
+      scopeCategory: negotiatedEntry.scopeCategory,
+    };
+  }
+
   if (!priceLists.length) {
     return { price: product.precio ?? 0, source: "base" };
   }
@@ -173,6 +215,7 @@ export default function ProductSelectionModal({
   customer,
   priceLists = [],
   companyId = "E01",
+  negotiatedPrices = {} as Record<string, NegotiatedPriceInfo>,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -181,6 +224,7 @@ export default function ProductSelectionModal({
   customer?: CustomerPriceContext | null;
   priceLists?: PriceList[];
   companyId?: string;
+  negotiatedPrices?: Record<string, NegotiatedPriceInfo>;
 }) {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -311,7 +355,13 @@ export default function ProductSelectionModal({
   }, [masterProducts, products, selectedProvider, selectedLine, debouncedQ]);
 
   const openQty = (product: Product) => {
-    const priceInfo = getCustomerPrice(product, customer ?? null, priceLists, companyId || "E01");
+    const priceInfo = getCustomerPrice(
+      product,
+      customer ?? null,
+      priceLists,
+      companyId || "E01",
+      negotiatedPrices
+    );
     setActive(product);
     setActivePrice(priceInfo);
   };
@@ -325,8 +375,18 @@ export default function ProductSelectionModal({
     const nombreProveedor = active.proveedor ?? undefined;
     const codigoLinea = active.codigoLinea ?? active.codigoFiltroVenta ?? (active as any).lineaVenta ?? undefined;
     const nombreLinea = active.linea ?? active.filtroVenta ?? undefined;
-    const fromPriceList = activePrice.source === "lista" || activePrice.source === "default";
-    const listaCodigo = activePrice.listCode ?? undefined;
+    const isNegotiated = activePrice.source === "negotiated";
+    const fromStandardList = activePrice.source === "lista" || activePrice.source === "default";
+    const appliesPriceList = isNegotiated || fromStandardList;
+    const listaCodigo = isNegotiated
+      ? activePrice.offerCode ?? undefined
+      : activePrice.listCode ?? undefined;
+    const displayListName = isNegotiated
+      ? activePrice.offerName ?? activePrice.listName
+      : activePrice.listName;
+    const appliedOfferName = isNegotiated
+      ? activePrice.offerName ?? activePrice.listName ?? "Precio negociado"
+      : undefined;
 
     const item: OrderItem = {
       id: uuidItem(),
@@ -336,16 +396,18 @@ export default function ProductSelectionModal({
       precioUnitario: price,
       subtotal,
       subtotalSinDescuento: subtotal,
-      priceSource: activePrice.source,
-      priceListName: activePrice.listName,
-      priceListId: activePrice.listId,
-      priceListCode: activePrice.listCode,
+      priceSource: isNegotiated ? "negotiated" : activePrice.source,
+      priceListName: displayListName,
+      priceListId: isNegotiated ? undefined : activePrice.listId,
+      priceListCode: isNegotiated ? activePrice.offerCode ?? undefined : activePrice.listCode,
       codigoProveedor: codigoProveedor ?? null,
       nombreProveedor: nombreProveedor ?? null,
       codigoLinea: codigoLinea ?? null,
       nombreLinea: nombreLinea ?? null,
       ofertaCodigo: listaCodigo ?? null,
-      tipoOferta: fromPriceList ? "pricelist" : undefined,
+      ofertaIdAplicada: isNegotiated ? activePrice.offerId ?? undefined : undefined,
+      ofertaNombre: appliedOfferName,
+      tipoOferta: appliesPriceList ? "pricelist" : undefined,
     };
 
     onPick([item]);
@@ -478,7 +540,13 @@ export default function ProductSelectionModal({
                   {filtered.map((p) => {
                     const alreadyQty = existingItems?.[p.codigoProducto] ?? 0;
                     const selected = alreadyQty > 0;
-                    const priceInfo = getCustomerPrice(p, customer ?? null, priceLists, companyId || "E01");
+                    const priceInfo = getCustomerPrice(
+                      p,
+                      customer ?? null,
+                      priceLists,
+                      companyId || "E01",
+                      negotiatedPrices
+                    );
                     const unit = priceInfo.price ?? 0;
 
                     return (
@@ -513,7 +581,7 @@ export default function ProductSelectionModal({
                                 className="w-full h-full object-cover cursor-zoom-in"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setZoomImg(p.urlImg || null);
+                                 setZoomImg(p.urlImg || null);
                                 }}
                                 title="Ver imagen"
                               />
@@ -534,6 +602,17 @@ export default function ProductSelectionModal({
                             <div className="text-[11px] text-muted-foreground truncate">{p.codigoProducto}</div>
 
                             <div className="flex flex-wrap gap-1 mt-1">
+                              {priceInfo.source === "negotiated" && (
+                                <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-100 text-emerald-800 rounded px-2 py-0.5 font-semibold">
+                                  Negociado
+                                  {priceInfo.priority !== undefined && (
+                                    <span className="inline-flex items-center text-[9px] font-semibold bg-white/60 text-emerald-700 rounded-full px-2 py-[1px]">
+                                      P{priceInfo.priority}
+                                      {priceInfo.scopeCategory && ` · ${NEGOTIATED_SCOPE_LABELS[priceInfo.scopeCategory] || priceInfo.scopeCategory}`}
+                                    </span>
+                                  )}
+                                </span>
+                              )}
                               {p.proveedor && (
                                 <span className="inline-flex items-center text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100 rounded px-2 py-0.5">
                                   {p.proveedor}
@@ -548,8 +627,20 @@ export default function ProductSelectionModal({
 
                             {/* Solo muestra lista si existe (compacto) */}
                             {priceInfo.listName && (
-                              <div className="text-[10px] text-muted-foreground truncate mt-1">
+                              <div
+                                className={
+                                  "text-[10px] truncate mt-1 " +
+                                  (priceInfo.source === "negotiated"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-muted-foreground")
+                                }
+                              >
                                 {priceInfo.listName}
+                                {priceInfo.source === "negotiated" && priceInfo.priority !== undefined && (
+                                  <span className="ml-1 text-[9px] font-normal text-emerald-700">
+                                    (P{priceInfo.priority})
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>

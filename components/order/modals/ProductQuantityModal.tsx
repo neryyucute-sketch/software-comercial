@@ -23,7 +23,7 @@ export default function ProductQuantityModal({
   price: number;
   initialQty?: number;
   onConfirm: (qty: number) => void;
-  priceSource?: "lista" | "default" | "base";
+  priceSource?: "lista" | "default" | "base" | "negotiated";
   priceListName?: string;
 }) {
   const [qty, setQty] = useState(initialQty);
@@ -54,14 +54,26 @@ export default function ProductQuantityModal({
             <div className="text-sm text-muted-foreground flex items-center gap-2">
               Precio unitario
               {priceSource && priceSource !== "base" && (
-                <Badge 
-                  variant="outline" 
-                  className={priceSource === "lista" 
-                    ? "bg-blue-50 text-blue-700 border-blue-200" 
-                    : "bg-gray-50 text-gray-700 border-gray-200"
-                  }
+                <Badge
+                  variant="outline"
+                  className={(() => {
+                    switch (priceSource) {
+                      case "lista":
+                        return "bg-blue-50 text-blue-700 border-blue-200";
+                      case "default":
+                        return "bg-gray-50 text-gray-700 border-gray-200";
+                      case "negotiated":
+                        return "bg-emerald-50 text-emerald-700 border-emerald-200";
+                      default:
+                        return "bg-gray-50 text-gray-700 border-gray-200";
+                    }
+                  })()}
                 >
-                  {priceSource === "lista" ? "Lista cliente" : "Lista default"}
+                  {priceSource === "lista"
+                    ? "Lista cliente"
+                    : priceSource === "negotiated"
+                    ? "Precio negociado"
+                    : "Lista default"}
                 </Badge>
               )}
             </div>

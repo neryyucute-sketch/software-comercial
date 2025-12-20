@@ -151,9 +151,11 @@ export async function createOfferDefOnline(draft: OfferDef, actorUsername?: stri
       subfamilias: draft.subfamilias,
       proveedores: draft.proveedores,
       stackableWithSameProduct: draft.stackableWithSameProduct,
+      priority: draft.priority ?? 5,
       discount: draft.discount,
       bonus: draft.bonus,
       pack: draft.pack,
+      priceList: draft.priceList,
       createdAt: createdAtIso,
       createdBy,
       updatedAt: updatedAtIso,
@@ -238,9 +240,11 @@ export async function updateOfferDefOnline(draft: OfferDef, actorUsername?: stri
       subfamilias: draft.subfamilias,
       proveedores: draft.proveedores,
       stackableWithSameProduct: draft.stackableWithSameProduct,
+      priority: draft.priority ?? 5,
       discount: draft.discount,
       bonus: draft.bonus,
       pack: draft.pack,
+      priceList: draft.priceList,
       createdAt: createdAtIso,
       createdBy,
       updatedAt: updatedAtIso,
@@ -379,9 +383,20 @@ export function mapBackendToOfferDef(data: any): OfferDef {
     subfamilias: detalle.subfamilias || [],
     proveedores: detalle.proveedores || [],
     stackableWithSameProduct: detalle.stackableWithSameProduct ?? false,
+    priority: (() => {
+      const raw = detalle.priority ?? data.priority ?? data.prioridad ?? null;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : 5;
+    })(),
     discount: detalle.discount,
     bonus: detalle.bonus,
     pack: detalle.pack,
+    priceList:
+      type === "pricelist"
+        ? { products: detalle.priceList?.products ?? [] }
+        : detalle.priceList
+        ? { products: detalle.priceList.products ?? [] }
+        : undefined,
     version: detalle.version ?? data.version ?? 1,
     createdAt: createdAtIso,
     createdBy,

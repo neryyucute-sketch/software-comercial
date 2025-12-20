@@ -243,6 +243,7 @@ async function cargarCatalogos() {
       subfamilias: [],
       proveedores: [],
       stackableWithSameProduct: false,
+      priority: 5,
       version: 1,
       updatedAt: new Date().toISOString(),
       dirty: false,
@@ -270,6 +271,7 @@ async function cargarCatalogos() {
         ...oferta,
         referenceCode: normalizedReference,
         codigoOferta: normalizedReference,
+        priority: Number.isFinite(Number(oferta.priority)) ? Number(oferta.priority) : 5,
         updatedAt: timestampIso,
         updatedBy: actorUsername ?? oferta.updatedBy,
         createdAt: oferta.createdAt ?? timestampIso,
@@ -634,6 +636,7 @@ async function cargarCatalogos() {
             setOfertaEditando(null);
           }}
           onSave={handleGuardarOferta}
+          existingOffers={ofertas}
           catalogs={catalogos}
           catalogsLoading={catalogsLoading}
           catalogsError={catalogsError}

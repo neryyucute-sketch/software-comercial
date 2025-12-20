@@ -203,7 +203,7 @@ export type OrderItem = {
   descuentoLinea?: number;
   total?: number;
   // metadata opcional
-  priceSource?: "lista" | "oferta" | "base" | "default";
+  priceSource?: "lista" | "oferta" | "base" | "default" | "negotiated";
   priceListName?: string;
   priceListId?: string;
   priceListCode?: string;

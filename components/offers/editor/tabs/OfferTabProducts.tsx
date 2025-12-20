@@ -4,7 +4,18 @@ import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import type { OfferDef } from "@/lib/types.offers";
 import type { CatalogoGeneral } from "@/lib/types";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { toast } from "@/hooks/use-toast";
 import { getAccessToken } from "@/services/auth";
 import { useRouter } from "next/navigation";
 
@@ -19,6 +30,101 @@ type Props = {
 type Criterio = "product" | "provider" | "line";
 type PackState = NonNullable<OfferDef["pack"]>;
 
+type BulkPriceEntry = {
+  productId: string;
+  price: number;
+};
+
+const BULK_SEPARATORS = [",", ";", "\t"] as const;
+
+const stripWrappingQuotes = (value: string): string =>
+  value.replace(/^['"`]+/, "").replace(/['"`]+$/, "");
+
+const normalizeBulkPriceValue = (raw: string): number | null => {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const compact = trimmed.replace(/\s+/g, "");
+
+  const dotPattern = /^\d+(?:\.\d+)?$/;
+  const commaPattern = /^\d+(?:,\d+)?$/;
+
+  if (dotPattern.test(compact)) {
+    return Number(compact);
+  }
+
+  if (commaPattern.test(compact) && compact.indexOf(".") === -1) {
+    return Number(compact.replace(",", "."));
+  }
+
+  const sanitized = compact.replace(/[^0-9,.-]/g, "");
+  const lastComma = sanitized.lastIndexOf(",");
+  const lastDot = sanitized.lastIndexOf(".");
+
+  if (lastComma > -1 && lastDot > -1) {
+    if (lastComma > lastDot) {
+      const value = Number(sanitized.replace(/\./g, "").replace(",", "."));
+      return Number.isNaN(value) ? null : value;
+    }
+    if (lastDot > lastComma) {
+      const value = Number(sanitized.replace(/,/g, ""));
+      return Number.isNaN(value) ? null : value;
+    }
+  }
+
+  const fallback = Number(sanitized);
+  return Number.isNaN(fallback) ? null : fallback;
+};
+
+const parseBulkPriceInput = (input: string): { entries: BulkPriceEntry[]; errors: string[] } => {
+  const entries: BulkPriceEntry[] = [];
+  const errors: string[] = [];
+  if (!input) {
+    return { entries, errors };
+  }
+
+  const lines = input.split(/\r?\n/);
+
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return;
+    const baseLine = stripWrappingQuotes(trimmedLine);
+    if (!baseLine) return;
+
+    let skuPart = "";
+    let pricePart = "";
+
+    for (const separator of BULK_SEPARATORS) {
+      const sepIndex = baseLine.indexOf(separator);
+      if (sepIndex !== -1) {
+        skuPart = baseLine.slice(0, sepIndex);
+        pricePart = baseLine.slice(sepIndex + 1);
+        break;
+      }
+    }
+
+    if (!pricePart) {
+      const segments = baseLine.split(/\s+/);
+      if (segments.length >= 2) {
+        skuPart = segments[0];
+        pricePart = segments.slice(1).join(" ");
+      }
+    }
+
+    const sku = stripWrappingQuotes(skuPart).trim();
+    const priceValue = normalizeBulkPriceValue(stripWrappingQuotes(pricePart));
+
+    if (!sku || priceValue === null || !Number.isFinite(priceValue) || priceValue <= 0) {
+      errors.push(`Línea ${index + 1}: formato inválido. Usa "SKU,precio".`);
+      return;
+    }
+
+    entries.push({ productId: sku, price: priceValue });
+  });
+
+  return { entries, errors };
+};
+
 export function OfferTabProducts({
   draft,
   update,
@@ -30,13 +136,28 @@ export function OfferTabProducts({
   const isPackOffer = draft.type === "combo" || draft.type === "kit";
   const isKitOffer = draft.type === "kit";
   const isComboOffer = draft.type === "combo";
+  const isPriceListOffer = draft.type === "pricelist";
   const [addMode, setAddMode] = useState<"fixed" | "variable">("fixed");
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  const bulkParse = useMemo(() => parseBulkPriceInput(bulkText), [bulkText]);
 
   useEffect(() => {
     if (isKitOffer && addMode !== "fixed") {
       setAddMode("fixed");
     }
   }, [isKitOffer, addMode]);
+
+  useEffect(() => {
+    if (!bulkModalOpen) {
+      setBulkText("");
+      setBulkError(null);
+    } else {
+      setBulkError(null);
+    }
+  }, [bulkModalOpen]);
 
   const ensurePack = (pack?: PackState): PackState => ({
     precioFijo: pack?.precioFijo ?? 0,
@@ -78,7 +199,7 @@ export function OfferTabProducts({
   });
 
   // 👇 Mostrar mensaje si los catálogos están vacíos
-  if (proveedores.length === 0 && familias.length === 0 && lineas.length === 0) {
+  if (!isPriceListOffer && proveedores.length === 0 && familias.length === 0 && lineas.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-center text-amber-600">
@@ -129,7 +250,10 @@ export function OfferTabProducts({
   const observerTarget = useRef<HTMLDivElement>(null);
   
   const [productosMap, setProductosMap] = useState<Map<string, any>>(new Map());
-  const codigosProductoSeleccionados: string[] = draft.products ?? [];
+  const priceListProducts = draft.priceList?.products ?? [];
+  const codigosProductoSeleccionados: string[] = isPriceListOffer
+    ? priceListProducts.map((item) => item.productId)
+    : (draft.products ?? []);
   const packFixedItems = draft.pack?.itemsFijos ?? [];
   const packVariableItems = isKitOffer ? [] : (draft.pack?.itemsVariablesPermitidos ?? []);
   const packFixedUnits = packFixedItems.reduce(
@@ -157,6 +281,16 @@ export function OfferTabProducts({
       if (!normalized) return true;
       if (["inactivo", "inactive", "0", "false", "no"].includes(normalized)) return false;
       return true;
+    });
+  }, []);
+
+  const formatPrice = useCallback((value?: number | null) => {
+    if (value === undefined || value === null || Number.isNaN(Number(value))) {
+      return "—";
+    }
+    return Number(value).toLocaleString("es-GT", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     });
   }, []);
   
@@ -332,25 +466,159 @@ export function OfferTabProducts({
       }
     };
   }, [hasMore, loadingProductos, loadMore]);
+
+  useEffect(() => {
+    if (!isPriceListOffer || priceListProducts.length === 0) return;
+    setProductosMap((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const item of priceListProducts) {
+        if (next.has(item.productId)) continue;
+        next.set(item.productId, {
+          codigoProducto: item.productId,
+          descripcion: item.description ?? item.productId,
+          precio: item.basePrice ?? item.price ?? undefined,
+        });
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [isPriceListOffer, priceListProducts]);
   
   const handleAddProducto = (producto: any) => {
-    const codigo = producto.codigoProducto ?? producto.codigo;
-    
-    const actuales = draft.products ?? [];
-    if (actuales.includes(codigo)) {
-      return;
-    }
-  
+    const codigo = producto?.codigoProducto ?? producto?.codigo;
+    if (!codigo) return;
+
     setProductosMap((prev) => {
       const next = new Map(prev);
       next.set(codigo, producto);
       return next;
     });
 
-    update((d) => ({
-      ...d,
-      products: [...actuales, codigo],
-    }));
+    if (isPriceListOffer) {
+      update((d) => {
+        const currentList = d.priceList?.products ?? [];
+        if (currentList.some((item) => item.productId === codigo)) {
+          return d;
+        }
+
+        const rawPrice =
+          typeof producto?.precio === "number"
+            ? producto.precio
+            : typeof producto?.precioLista === "number"
+            ? producto.precioLista
+            : typeof producto?.precioUnitario === "number"
+            ? producto.precioUnitario
+            : undefined;
+        const numericPrice =
+          rawPrice !== undefined && !Number.isNaN(Number(rawPrice))
+            ? Number(rawPrice)
+            : undefined;
+        const nextList = [
+          ...currentList,
+          {
+            productId: codigo,
+            price: numericPrice,
+            description: producto?.descripcion ?? producto?.nombre ?? undefined,
+            basePrice: numericPrice,
+          },
+        ];
+        const nextProducts = new Set(d.products ?? []);
+        nextProducts.add(codigo);
+        return {
+          ...d,
+          products: Array.from(nextProducts),
+          priceList: { products: nextList },
+        };
+      });
+      return;
+    }
+
+    update((d) => {
+      const actuales = d.products ?? [];
+      if (actuales.includes(codigo)) {
+        return d;
+      }
+      return {
+        ...d,
+        products: [...actuales, codigo],
+      };
+    });
+  };
+
+  const handleApplyBulkPrices = () => {
+    const parsed = parseBulkPriceInput(bulkText);
+    if (!parsed.entries.length) {
+      setBulkError(parsed.errors[0] ?? "No se detectaron pares SKU, precio.");
+      return;
+    }
+    if (parsed.errors.length) {
+      setBulkError(parsed.errors[0]);
+      return;
+    }
+
+    setBulkError(null);
+
+    let createdCount = 0;
+    let updatedCount = 0;
+
+    update((d) => {
+      const currentList = d.priceList?.products ?? [];
+      const map = new Map(currentList.map((item) => [item.productId.trim(), item]));
+      const nextProductsSet = new Set(d.products ?? []);
+      const seenInBatch = new Set<string>();
+      let localCreated = 0;
+      let localUpdated = 0;
+
+      parsed.entries.forEach((entry) => {
+        const key = entry.productId.trim();
+        if (!key) return;
+
+        const existing = map.get(key);
+        const duplicate = seenInBatch.has(key);
+
+        if (existing) {
+          if (!duplicate) {
+            localUpdated += 1;
+          }
+          map.set(key, { ...existing, price: entry.price });
+        } else {
+          if (!duplicate) {
+            localCreated += 1;
+          }
+          const productInfo = productosMap.get(key);
+          map.set(key, {
+            productId: key,
+            price: entry.price,
+            description: productInfo?.descripcion ?? productInfo?.nombre ?? undefined,
+            basePrice:
+              typeof productInfo?.precio === "number"
+                ? Number(productInfo.precio)
+                : undefined,
+          });
+        }
+
+        seenInBatch.add(key);
+        nextProductsSet.add(key);
+      });
+
+      createdCount = localCreated;
+      updatedCount = localUpdated;
+
+      return {
+        ...d,
+        products: Array.from(nextProductsSet),
+        priceList: { products: Array.from(map.values()) },
+      };
+    });
+
+    setBulkModalOpen(false);
+    setBulkText("");
+
+    toast({
+      title: "Lista negociada actualizada",
+      description: `Se agregaron ${createdCount} y se actualizaron ${updatedCount}.`,
+    });
   };
 
   const rememberProduct = (producto: any) => {
@@ -362,6 +630,41 @@ export function OfferTabProducts({
         next.set(codigo, producto);
       }
       return next;
+    });
+  };
+
+  const handlePriceListPriceChange = (productId: string, rawValue: string) => {
+    if (!isPriceListOffer) return;
+    update((d) => {
+      const currentList = d.priceList?.products ?? [];
+      const nextList = currentList.map((item) => {
+        if (item.productId !== productId) return item;
+        if (rawValue === "") {
+          return { ...item, price: undefined };
+        }
+        const parsed = Number(rawValue);
+        if (Number.isNaN(parsed)) {
+          return item;
+        }
+        return { ...item, price: parsed };
+      });
+      return {
+        ...d,
+        priceList: { products: nextList },
+      };
+    });
+  };
+
+  const handleRemovePriceListProduct = (productId: string) => {
+    update((d) => {
+      const currentList = d.priceList?.products ?? [];
+      const nextList = currentList.filter((item) => item.productId !== productId);
+      const remainingProducts = (d.products ?? []).filter((code) => code !== productId);
+      return {
+        ...d,
+        products: remainingProducts,
+        priceList: nextList.length ? { products: nextList } : undefined,
+      };
     });
   };
 
@@ -812,6 +1115,255 @@ export function OfferTabProducts({
           </div>
         </div>
       </div>
+    );
+  }
+
+  if (isPriceListOffer) {
+    const bulkDerivedError = bulkError ?? bulkParse.errors[0] ?? null;
+    const previewEntries = bulkParse.entries.slice(0, 5);
+    const previewCount = bulkParse.entries.length;
+
+    return (
+      <>
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+            <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 lg:col-span-2">
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">
+                Buscar productos
+              </label>
+              <Input
+                value={queryProducto}
+                onChange={(e) => setQueryProducto(e.target.value)}
+                placeholder="Escribe al menos 2 caracteres…"
+                className="text-sm"
+              />
+            </div>
+
+            <div className="h-72 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 text-xs">
+              {loadingProductos && productosRemote.length === 0 && (
+                <div className="px-3 py-2 text-slate-400">Buscando productos…</div>
+              )}
+
+              {!loadingProductos && queryProducto.trim().length < 2 && (
+                <div className="px-3 py-2 text-slate-400">
+                  Escribe al menos 2 caracteres para buscar.
+                </div>
+              )}
+
+              {!loadingProductos && queryProducto.trim().length >= 2 && productosRemote.length === 0 && (
+                <div className="px-3 py-2 text-slate-400">
+                  No se encontraron productos.
+                </div>
+              )}
+
+              {productosRemote.map((p) => {
+                const codigo = p.codigoProducto ?? p.codigo;
+                const desc = p.descripcion ?? p.nombre ?? "";
+                const yaSeleccionado = priceListProducts.some((item) => item.productId === codigo);
+                const basePrice =
+                  typeof p?.precio === "number"
+                    ? Number(p.precio)
+                    : typeof p?.precioLista === "number"
+                    ? Number(p.precioLista)
+                    : typeof p?.precioUnitario === "number"
+                    ? Number(p.precioUnitario)
+                    : undefined;
+
+                return (
+                  <div
+                    key={codigo}
+                    className={cn(
+                      "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
+                      yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"
+                    )}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-slate-800">{codigo}</div>
+                      <div className="text-xs text-slate-600 truncate">{desc}</div>
+                      <div className="text-[11px] text-slate-400 mt-1">
+                        Precio base: {formatPrice(basePrice)}
+                      </div>
+                    </div>
+                    {yaSeleccionado ? (
+                      <span className="flex-shrink-0 px-3 py-1 bg-emerald-600 text-white text-xs rounded-md font-medium">
+                        ✓
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleAddProducto(p)}
+                        className="flex-shrink-0 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-md font-medium"
+                      >
+                        +
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+
+              {hasMore && queryProducto.trim().length >= 2 && productosRemote.length > 0 && (
+                <div ref={observerTarget} className="px-3 py-2 text-center">
+                  {loadingProductos ? (
+                    <span className="text-slate-400 text-xs">Cargando más…</span>
+                  ) : (
+                    <span className="text-slate-300 text-xs">
+                      ↓ Scroll para más (página {page + 1} de {totalPages})
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 lg:col-span-3">
+            <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="text-sm font-semibold text-slate-700">
+                Productos negociados ({priceListProducts.length})
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-slate-500">
+                  Define el precio final que verán los clientes asignados.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setBulkModalOpen(true)}
+                >
+                  Pegar lista
+                </Button>
+              </div>
+            </div>
+
+            {priceListProducts.length === 0 ? (
+              <div className="h-72 flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-400 text-sm">
+                Aún no has agregado productos.
+              </div>
+            ) : (
+              <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-200">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Producto</th>
+                      <th className="px-3 py-2 text-left">Precio base</th>
+                      <th className="px-3 py-2 text-left">Precio negociado</th>
+                      <th className="px-3 py-2 text-right"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white">
+                    {priceListProducts.map((item) => {
+                      const producto = productosMap.get(item.productId) ?? null;
+                      const descripcion = item.description ?? producto?.descripcion ?? producto?.nombre ?? "";
+                      const basePrice =
+                        item.basePrice ??
+                        (typeof producto?.precio === "number" ? Number(producto.precio) : undefined);
+                      const negotiatedValue = typeof item.price === "number" ? item.price : "";
+
+                      return (
+                        <tr key={item.productId} className="align-top">
+                          <td className="px-3 py-3">
+                            <div className="font-semibold text-slate-900">{item.productId}</div>
+                            {descripcion && (
+                              <div className="text-xs text-slate-500 mt-1">{descripcion}</div>
+                            )}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-600">
+                            {formatPrice(basePrice)}
+                          </td>
+                          <td className="px-3 py-3">
+                            <Input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={negotiatedValue}
+                              onChange={(e) => handlePriceListPriceChange(item.productId, e.target.value)}
+                              className="text-sm"
+                            />
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <button
+                              type="button"
+                              className="text-red-600 hover:text-red-800 font-semibold"
+                              onClick={() => handleRemovePriceListProduct(item.productId)}
+                            >
+                              ×
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+        </div>
+
+        <Dialog open={bulkModalOpen} onOpenChange={setBulkModalOpen}>
+          <DialogContent className="sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Pegar lista de precios</DialogTitle>
+              <DialogDescription>
+                Pega líneas con el formato <span className="font-mono text-xs">SKU,precio</span>.
+                También se aceptan separadores por tabulación o espacio.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3">
+              <Textarea
+                value={bulkText}
+                onChange={(event) => setBulkText(event.target.value)}
+                placeholder={`Ejemplo:\nSKU001, 125.50\nSKU002, 98.75`}
+                className="min-h-[160px] text-sm"
+              />
+
+              {bulkDerivedError ? (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {bulkDerivedError}
+                </div>
+              ) : (
+                bulkText && (
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+                    {previewCount === 1
+                      ? "Se detectó 1 producto listo para importar."
+                      : `Se detectaron ${previewCount} productos listos para importar.`}
+                    {previewEntries.length > 0 && (
+                      <ul className="mt-2 space-y-1 text-emerald-800">
+                        {previewEntries.map((entry) => (
+                          <li key={entry.productId} className="font-mono text-[11px]">
+                            {entry.productId} → {entry.price.toFixed(2)}
+                          </li>
+                        ))}
+                        {previewCount > previewEntries.length && (
+                          <li className="text-[11px] text-emerald-600">
+                            … y {previewCount - previewEntries.length} más
+                          </li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                )
+              )}
+            </div>
+
+            <DialogFooter className="mt-4 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => setBulkModalOpen(false)}
+              >
+                Cancelar
+              </Button>
+              <Button
+                onClick={handleApplyBulkPrices}
+                disabled={!bulkText.trim() || Boolean(bulkDerivedError)}
+              >
+                Aplicar cambios
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </>
     );
   }
 

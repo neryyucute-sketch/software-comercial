@@ -24,6 +24,7 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
   const isPackOffer = draft.type === "combo" || draft.type === "kit";
   const isCombo = draft.type === "combo";
   const isKit = draft.type === "kit";
+  const isPriceListOffer = draft.type === "pricelist";
   const isReferenceLocked = Boolean(draft.referenceCode && draft.serverId);
 
   const ensurePack = () => ({
@@ -263,6 +264,20 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
                     ...d,
                     type: nextType,
                   } as typeof d;
+                  if (nextType === "pricelist" && !Number.isFinite(Number(next.priority))) {
+                    next.priority = 5;
+                  }
+                  if (nextType === "pricelist") {
+                    next.discount = undefined;
+                    next.bonus = undefined;
+                    next.pack = undefined;
+                    next.priceList = d.priceList ?? { products: [] };
+                  } else {
+                    next.priceList = undefined;
+                    if (!Number.isFinite(Number(next.priority))) {
+                      next.priority = undefined;
+                    }
+                  }
                   if (nextType === "combo" || nextType === "kit") {
                     const basePack = {
                       precioFijo: d.pack?.precioFijo ?? 0,
@@ -279,6 +294,8 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
                       basePack.cantidadTotalProductos = unidades;
                     }
                     next.pack = basePack;
+                  } else {
+                    next.pack = undefined;
                   }
                   if (nextType === "discount") {
                     next.bonus = undefined;
@@ -369,26 +386,58 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
           </div>
         </div>
 
-        <div className="flex items-start gap-3 rounded-lg border border-slate-200 bg-white p-3">
-          <input
-            id="stackableWithSameProduct"
-            type="checkbox"
-            className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-            checked={!!draft.stackableWithSameProduct}
-            onChange={(e) =>
-              setDraft((d) => ({
-                ...d,
-                stackableWithSameProduct: e.target.checked,
-              }))
-            }
-          />
-          <div className="space-y-1">
-            <Label htmlFor="stackableWithSameProduct">Permitir combinar con otras ofertas del mismo producto</Label>
-            <p className="text-xs text-slate-600">
-              Si está activo, esta oferta puede coexistir con otras que afecten los mismos productos. De lo contrario, se considerará exclusiva por producto.
-            </p>
+        {isPriceListOffer && (
+          <div className="grid gap-3 rounded-lg border border-emerald-200 bg-white p-3 md:grid-cols-2">
+            <div>
+              <Label>Prioridad de la lista</Label>
+              <Input
+                type="number"
+                min={1}
+                max={99}
+                step={1}
+                className="mt-1"
+                value={Number.isFinite(Number(draft.priority)) ? Number(draft.priority) : ""}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const parsed = Number(raw);
+                  setDraft((d) => ({
+                    ...d,
+                    priority: raw === "" ? undefined : Number.isFinite(parsed) ? parsed : d.priority,
+                  }));
+                }}
+              />
+              <p className="mt-1 text-xs text-emerald-800/80">
+                Menor número = mayor prioridad. Valor predeterminado: 5. Úsalo para desempatar listas del mismo tipo.
+              </p>
+            </div>
+            <div className="rounded-md border border-emerald-100 bg-emerald-50/60 p-3 text-xs text-emerald-900">
+              Primero se aplica la lista más específica (cliente &gt; subcanal &gt; canal &gt; general). La prioridad decide entre listas del mismo grupo.
+            </div>
           </div>
-        </div>
+        )}
+
+        {!isPriceListOffer && (
+          <div className="flex items-start gap-3 rounded-lg border border-slate-200 bg-white p-3">
+            <input
+              id="stackableWithSameProduct"
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+              checked={!!draft.stackableWithSameProduct}
+              onChange={(e) =>
+                setDraft((d) => ({
+                  ...d,
+                  stackableWithSameProduct: e.target.checked,
+                }))
+              }
+            />
+            <div className="space-y-1">
+              <Label htmlFor="stackableWithSameProduct">Permitir combinar con otras ofertas del mismo producto</Label>
+              <p className="text-xs text-slate-600">
+                Si está activo, esta oferta puede coexistir con otras que afecten los mismos productos. De lo contrario, se considerará exclusiva por producto.
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3">
           <Label>Código de oferta</Label>
