@@ -295,56 +295,87 @@ function validateClientRestrictions(offer: OfferDef, cliente: Cliente): boolean 
   const scope = offer.scope || {};
   if (!scope || Object.keys(scope).length === 0) return true;
 
-  // Helper: compare tolerantemente (codigo o descripcion), case-insensitive
-  const matchesAny = (candidates: any[] | undefined, valueCandidates: any[], label: string) => {
-    if (!candidates || candidates.length === 0) return true;
-    const lowCandidates = candidates.map((x: any) => String(x).trim().toLowerCase());
-    const hasAnyValue = valueCandidates.some((v) => v !== undefined && v !== null && String(v).trim() !== "");
-    // Si no tenemos datos del cliente para ese campo, no descartamos la oferta (evitamos falsos negativos)
-    if (!hasAnyValue) {
-      console.debug('[offers-engine] client scope no data for', label, { candidates, valueCandidates });
-      return true;
+  const normalizeValue = (value: unknown): string | null => {
+    if (value === undefined || value === null) return null;
+    const raw = String(value)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim()
+      .toLowerCase();
+    return raw.length ? raw : null;
+  };
+
+  const expandVariants = (value: unknown, bucket: Set<string>) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => expandVariants(entry, bucket));
+      return;
     }
-    for (const v of valueCandidates) {
-      if (v === undefined || v === null) continue;
-      const s = String(v).trim().toLowerCase();
-      if (lowCandidates.includes(s)) return true;
-      // sometimes candidates contain numeric codes while value is text with code+desc ("1 — MAYOREO")
-      for (const c of lowCandidates) {
-        if (c.includes(s) || s.includes(c)) return true;
+    const normalized = normalizeValue(value);
+    if (!normalized) return;
+    bucket.add(normalized);
+
+    const parts = normalized.split(/[\s\-_/|\u2013\u2014]+/).filter(Boolean);
+    for (const part of parts) {
+      bucket.add(part);
+      if (/^\d+$/.test(part)) {
+        bucket.add(part.replace(/^0+/, "") || "0");
       }
     }
-    console.debug('[offers-engine] client scope mismatch on', label, { candidates, valueCandidates });
+
+    if (/^\d+$/.test(normalized)) {
+      bucket.add(normalized.replace(/^0+/, "") || "0");
+    }
+  };
+
+  const matchesAny = (candidates: unknown[] | undefined, rawValues: unknown[], label: string): boolean => {
+    if (!candidates || candidates.length === 0) return true;
+
+    const candidateVariants = new Set<string>();
+    candidates.forEach((candidate) => expandVariants(candidate, candidateVariants));
+    if (candidateVariants.size === 0) return true;
+
+    const valueVariants = new Set<string>();
+    rawValues.forEach((value) => expandVariants(value, valueVariants));
+
+    if (valueVariants.size === 0) {
+      console.debug('[offers-engine] client scope missing data for', label, { candidates, rawValues });
+      return false;
+    }
+
+    for (const variant of valueVariants) {
+      if (candidateVariants.has(variant)) return true;
+    }
+
+    console.debug('[offers-engine] client scope mismatch on', label, {
+      candidates,
+      rawValues,
+      normalizedCandidates: Array.from(candidateVariants),
+      normalizedValues: Array.from(valueVariants),
+    });
     return false;
   };
 
-  if (scope.codigosCliente && scope.codigosCliente.length > 0) {
-    const matches = scope.codigosCliente.map(String).some((c) => String(c).trim() === String(cliente.codigoCliente).trim());
-    if (!matches) {
-      console.debug('[offers-engine] client scope mismatch on codigosCliente', { expected: scope.codigosCliente, got: cliente.codigoCliente });
-      return false;
-    }
-  }
+  const clientCodes = [
+    cliente.codigoCliente,
+    (cliente as any).codigo,
+    (cliente as any).idt,
+  ];
+  if (!matchesAny(scope.codigosCliente, clientCodes, 'codigosCliente')) return false;
 
-  if (scope.canales && scope.canales.length > 0) {
-    const clienteCanalCandidates = [
-      (cliente as any).canalVenta,
-      (cliente as any).canal,
-      (cliente as any).tipoCliente,
-      (cliente as any).codigoCanal,
-      (cliente as any).canalCodigo,
-    ];
-    if (!matchesAny(scope.canales, clienteCanalCandidates, 'canales')) return false;
-  }
+  const clientChannels = [
+    (cliente as any).canalVenta,
+    (cliente as any).canal,
+    (cliente as any).codigoCanal,
+    (cliente as any).canalCodigo,
+  ];
+  if (!matchesAny(scope.canales, clientChannels, 'canales')) return false;
 
-  if (scope.subCanales && scope.subCanales.length > 0) {
-    const clienteSubCandidates = [
-      (cliente as any).subCanalVenta,
-      (cliente as any).subCanal,
-      (cliente as any).codigoSubCanal,
-    ];
-    if (!matchesAny(scope.subCanales, clienteSubCandidates, 'subCanales')) return false;
-  }
+  const clientSubChannels = [
+    (cliente as any).subCanalVenta,
+    (cliente as any).subCanal,
+    (cliente as any).codigoSubCanal,
+  ];
+  if (!matchesAny(scope.subCanales, clientSubChannels, 'subCanales')) return false;
 
   return true;
 }

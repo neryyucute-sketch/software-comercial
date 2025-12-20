@@ -3,7 +3,7 @@ import { SyncManager } from "@/components/sync-manager"
 
 export default function SyncPage() {
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="container mx-auto px-2 pt-3">
       <div className="max-w-2xl mx-auto">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Sincronización de Datos</h1>

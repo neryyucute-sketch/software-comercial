@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, type ReactNode, useEffect, useState } from "react"
+import { createContext, useContext, type ReactNode, useEffect, useState, useCallback } from "react"
 import type {
   Product,
   Cliente,
@@ -20,6 +20,7 @@ import {
   updatePriceListOnline,
   deletePriceListOnline,
   syncPriceListsFromBackend,
+  getPriceListsOnline,
 } from "@/services/pricelists.repo"
 
 
@@ -75,12 +76,15 @@ const normalizePriceLists = (items: PriceList[]): PriceList[] =>
             ? 0
             : 0
 
-    const idFromStore = (pl as any).id || (pl as any).idt || generateId()
+    // serverId solo cuando viene del backend; evitar que el codigo o id local se use como uuid
+    const serverId = (pl as any).serverId || (pl as any).uuidListaPrecio || undefined
+    const idFromStore = serverId || (pl as any).id || (pl as any).idt || generateId()
     const name = pl.name || (pl as any).descripcion || "Lista sin nombre"
 
     return {
       ...pl,
       id: idFromStore,
+      serverId,
       name,
       companyId,
       tier,
@@ -88,6 +92,9 @@ const normalizePriceLists = (items: PriceList[]): PriceList[] =>
     }
   })
 
+
+const getPriceListCode = (tier: number) => (tier === 0 ? "default" : String(tier))
+type AddPriceListPayload = Omit<PriceList, "id" | "createdAt"> & { listCode?: string }
 /* --------------------------------- Contexto -------------------------------- */
 
 const PreventaContext = createContext<PreventaContextType | undefined>(undefined)
@@ -278,15 +285,23 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
   }
 
   /* ------------------------------ Listas de Precio --------------------------- */
-  const addPriceList = async (priceListData: Omit<PriceList, "id" | "createdAt">) => {
-    const shortId = Math.random().toString(36).slice(2, 10)
-    const created = await createPriceListOnline({
-      ...priceListData,
-      companyId: priceListData.companyId || "general",
-      tier: typeof priceListData.tier === "number" ? priceListData.tier : 0,
+  const addPriceList = async (priceListData: AddPriceListPayload) => {
+    const tier = priceListData.tier ?? 0
+    const listCode = priceListData.listCode ?? getPriceListCode(tier)
+    const companyId = priceListData.companyId || "general"
+    const localId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const { listCode: _discardListCode, ...rest } = priceListData
+    void _discardListCode
+    const payload: PriceList = {
+      ...rest,
+      companyId,
+      tier,
       createdAt: new Date(),
-      id: shortId,
-    } as PriceList)
+      id: localId,
+      serverId: undefined,
+      code: listCode,
+    }
+    const created = await createPriceListOnline(payload)
     const normalized = normalizePriceLists([created])[0]
     setPriceLists((prev) => [...prev, normalized])
   }
@@ -312,12 +327,20 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
     setPriceLists((prev) => prev.filter((pl) => pl.id !== id))
   }
 
-  const syncPriceLists = async (companyId: string) => {
+  const syncPriceLists = useCallback(async (companyId: string) => {
     const remote = await syncPriceListsFromBackend(companyId)
     const normalized = normalizePriceLists(remote)
     setPriceLists(normalized)
     return normalized
-  }
+  }, [])
+
+  // Carga directa desde backend sin tocar Dexie (para pantalla de precios)
+  const loadPriceListsOnline = useCallback(async (companyId: string) => {
+    const remote = await getPriceListsOnline(companyId)
+    const normalized = normalizePriceLists(remote)
+    setPriceLists(normalized)
+    return normalized
+  }, [])
 
   /* --------------------------------- Vendedores ------------------------------ */
   const addVendedor = async (vendedorData: Omit<Vendedor, "idt" | "createdAt">) => {
@@ -361,6 +384,7 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
     updatePriceList,
     deletePriceList,
     syncPriceLists,
+    loadPriceListsOnline,
 
     vendedor,
     addVendedor,
@@ -409,10 +433,11 @@ interface PreventaContextType {
   deleteKit: (id: string) => void
 
   priceLists: PriceList[]
-  addPriceList: (priceList: Omit<PriceList, "id" | "createdAt">) => Promise<void>
+  addPriceList: (priceList: AddPriceListPayload) => Promise<void>
   updatePriceList: (id: string, priceList: Partial<PriceList>) => Promise<void>
   deletePriceList: (id: string) => Promise<void>
   syncPriceLists: (companyId: string) => Promise<PriceList[]>
+  loadPriceListsOnline: (companyId: string) => Promise<PriceList[]>
 
   vendedor: Vendedor[]
   addVendedor: (vendedor: Omit<Vendedor, "idt" | "createdAt">) => void

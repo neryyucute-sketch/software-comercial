@@ -14,9 +14,10 @@ import { OfferEditorDialog } from "@/components/offers/editor/OfferEditorDialog"
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Pencil, Trash2, Loader2, Tag, Calendar, Building2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Loader2, Tag, Calendar, Building2, Gift, Package, Percent, BadgeDollarSign, ListChecks } from "lucide-react";
 import { getAccessToken } from "@/services/auth";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/contexts/AuthContext";
 
 const formatDate = (dateStr?: string) => {
   if (!dateStr) return "";
@@ -45,10 +46,43 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
   inactive: { bg: "bg-red-50", text: "text-red-700", border: "border-red-200" },
 };
 
+const dedupeOffers = (items: OfferDef[]): OfferDef[] => {
+  const ordered = new Map<string, OfferDef>();
+  const fallbacks: OfferDef[] = [];
+
+  for (const offer of items) {
+    const rawKey = (offer.serverId ?? offer.id) ?? "";
+    const key = typeof rawKey === "string" ? rawKey.trim() : rawKey.toString();
+
+    if (!key) {
+      fallbacks.push(offer);
+      continue;
+    }
+
+    const existing = ordered.get(key);
+    if (!existing) {
+      ordered.set(key, offer);
+      continue;
+    }
+
+    const existingUpdated = Date.parse(existing.updatedAt ?? "");
+    const currentUpdated = Date.parse(offer.updatedAt ?? "");
+    if (Number.isNaN(existingUpdated) || (!Number.isNaN(currentUpdated) && currentUpdated >= existingUpdated)) {
+      ordered.set(key, offer);
+    }
+  }
+
+  return [...ordered.values(), ...fallbacks];
+};
+
 export default function OffersPage() {
   const router = useRouter();
+  const { user } = useAuth();
   const [empresaSeleccionada, setEmpresaSeleccionada] = useState("TODAS");
   const [ofertas, setOfertas] = useState<OfferDef[]>([]);
+  const [page, setPage] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [pageSize] = useState(50);
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
   const [ofertaEditando, setOfertaEditando] = useState<OfferDef | null>(null);
@@ -90,9 +124,9 @@ export default function OffersPage() {
   }, []);
 
   useEffect(() => {
-    cargarOfertas();
+    cargarOfertas(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [empresaSeleccionada]);
+  }, [empresaSeleccionada, page]);
 
 async function cargarCatalogos() {
   try {
@@ -166,20 +200,20 @@ async function cargarCatalogos() {
   }
 }
 
-  async function cargarOfertas() {
+  async function cargarOfertas(pageToLoad = 0) {
     try {
       setLoading(true);
-      
       if (empresaSeleccionada === "TODAS") {
-        const todasOfertas: OfferDef[] = [];
-        for (const emp of EMPRESAS.filter(e => e.codigo !== "TODAS")) {
-          const items = await getOfferDefsOnline(emp.codigo);
-          todasOfertas.push(...items);
-        }
-        setOfertas(todasOfertas);
+        // Para "TODAS", solo muestra la primera página de la primera empresa (mejorar si necesitas paginado global)
+        const emp = EMPRESAS.find(e => e.codigo !== "TODAS");
+        if (!emp) return;
+        const { items, totalPages: tp } = await getOfferDefsOnline(emp.codigo, undefined, pageToLoad, pageSize);
+        setOfertas(dedupeOffers(items));
+        setTotalPages(tp);
       } else {
-        const items = await getOfferDefsOnline(empresaSeleccionada);
-        setOfertas(items);
+        const { items, totalPages: tp } = await getOfferDefsOnline(empresaSeleccionada, undefined, pageToLoad, pageSize);
+        setOfertas(dedupeOffers(items));
+        setTotalPages(tp);
       }
     } catch (error: any) {
       console.error("Error cargando ofertas:", error);
@@ -213,6 +247,8 @@ async function cargarCatalogos() {
       updatedAt: new Date().toISOString(),
       dirty: false,
       deleted: false,
+      referenceCode: "",
+      codigoOferta: "",
     };
 
     setOfertaEditando(nuevaOferta);
@@ -226,10 +262,24 @@ async function cargarCatalogos() {
 
   async function handleGuardarOferta(oferta: OfferDef) {
     try {
+      const actorUsername = user?.usuario?.trim() || undefined;
+      const timestampIso = new Date().toISOString();
+      const normalizedReference = oferta.referenceCode ? oferta.referenceCode.trim().toUpperCase() : undefined;
+
+      const ofertaAEnviar: OfferDef = {
+        ...oferta,
+        referenceCode: normalizedReference,
+        codigoOferta: normalizedReference,
+        updatedAt: timestampIso,
+        updatedBy: actorUsername ?? oferta.updatedBy,
+        createdAt: oferta.createdAt ?? timestampIso,
+        createdBy: oferta.createdBy ?? actorUsername,
+      };
+
       if (oferta.serverId) {
-        await updateOfferDefOnline(oferta);
+        await updateOfferDefOnline(ofertaAEnviar, actorUsername);
       } else {
-        await createOfferDefOnline(oferta);
+        await createOfferDefOnline(ofertaAEnviar, actorUsername);
       }
 
       setEditorOpen(false);
@@ -309,7 +359,7 @@ async function cargarCatalogos() {
   }, [ofertas, busqueda, fechaDesde, fechaHasta, tipoSel, estadoSel, modoFecha]);
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
+    <div className="container mx-auto p-2 pt-3 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold text-slate-900">Gestión de Ofertas</h1>
         <Button 
@@ -434,98 +484,145 @@ async function cargarCatalogos() {
           <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {ofertasFiltradas.length === 0 ? (
-            <div className="col-span-full text-center py-12 text-slate-500">
-              No hay ofertas creadas
-            </div>
-          ) : (
-            ofertasFiltradas.map((oferta) => {
-              const statusStyle = STATUS_COLORS[oferta.status] || STATUS_COLORS.draft;
-              const empresaNombre = EMPRESAS.find(e => e.codigo === oferta.codigoEmpresa)?.nombre || oferta.codigoEmpresa;
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {ofertasFiltradas.length === 0 ? (
+              <div className="col-span-full text-center py-12 text-slate-500">
+                No hay ofertas creadas
+              </div>
+            ) : (
+              ofertasFiltradas.map((oferta) => {
+                const statusStyle = STATUS_COLORS[oferta.status] || STATUS_COLORS.draft;
+                const empresaNombre = EMPRESAS.find(e => e.codigo === oferta.codigoEmpresa)?.nombre || oferta.codigoEmpresa;
 
-              return (
-                <div
-                  key={oferta.id}
-                  className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden"
-                >
-                  <div className="p-5 space-y-3">
-                    {/* Header con título y acciones */}
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-lg font-semibold text-slate-900 line-clamp-2 flex-1">
-                        {oferta.name || "Sin título"}
-                      </h3>
-                      <div className="flex gap-1 flex-shrink-0">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleEditarOferta(oferta)}
-                          className="h-8 w-8 p-0 hover:bg-slate-100"
-                        >
-                          <Pencil className="h-4 w-4 text-slate-600" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleEliminarOferta(oferta)}
-                          className="h-8 w-8 p-0 hover:bg-red-50"
-                        >
-                          <Trash2 className="h-4 w-4 text-red-600" />
-                        </Button>
-                      </div>
-                    </div>
+                // Distintivo visual por tipo de oferta
+                const tipoColor = {
+                  kit: 'bg-blue-100 text-blue-800 border-blue-200',
+                  combo: 'bg-orange-100 text-orange-800 border-orange-200',
+                  discount: 'bg-green-100 text-green-800 border-green-200',
+                  bonus: 'bg-purple-100 text-purple-800 border-purple-200',
+                  pricelist: 'bg-pink-100 text-pink-800 border-pink-200',
+                }[oferta.type] || 'bg-slate-100 text-slate-800 border-slate-200';
 
-                    {/* Descripción */}
-                    {oferta.description && (
-                      <p className="text-sm text-slate-600 line-clamp-2">
-                        {oferta.description}
-                      </p>
-                    )}
+                const tipoIcon = {
+                  kit: <Package className="h-4 w-4 mr-1" />,
+                  combo: <Gift className="h-4 w-4 mr-1" />,
+                  discount: <Percent className="h-4 w-4 mr-1" />,
+                  bonus: <BadgeDollarSign className="h-4 w-4 mr-1" />,
+                  pricelist: <ListChecks className="h-4 w-4 mr-1" />,
+                }[oferta.type] || <Tag className="h-4 w-4 mr-1" />;
 
-                    {/* Badges de información */}
-                    <div className="flex flex-wrap gap-2">
-                      <span className={cn(
-                        "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border",
-                        statusStyle.bg,
-                        statusStyle.text,
-                        statusStyle.border
-                      )}>
-                        <Tag className="h-3 w-3" />
-                        {TIPO_LABELS[oferta.type] || oferta.type}
-                      </span>
-
-                      <span className={cn(
-                        "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border capitalize",
-                        statusStyle.bg,
-                        statusStyle.text,
-                        statusStyle.border
-                      )}>
-                        {oferta.status === "draft" && "Borrador"}
-                        {oferta.status === "active" && "Activa"}
-                        {oferta.status === "inactive" && "Inactiva"}
-                      </span>
-                    </div>
-
-                    {/* Información adicional */}
-                    <div className="space-y-2 pt-2 border-t border-slate-100">
-                      <div className="flex items-center gap-2 text-xs text-slate-600">
-                        <Building2 className="h-3.5 w-3.5" />
-                        <span className="font-medium">{empresaNombre}</span>
+                return (
+                  <div
+                    key={oferta.id}
+                    className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden"
+                  >
+                    <div className="p-5 space-y-3">
+                      {/* Header con título, distintivo y acciones */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-bold uppercase shrink-0 ${tipoColor}`}
+                            title={TIPO_LABELS[oferta.type] || oferta.type}
+                          >
+                            {tipoIcon}
+                            {TIPO_LABELS[oferta.type] || oferta.type}
+                          </span>
+                          <h3 className="text-lg font-semibold text-slate-900 line-clamp-2 flex-1 ml-2">
+                            {oferta.name || "Sin título"}
+                          </h3>
+                        </div>
+                        <div className="flex gap-1 flex-shrink-0">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleEditarOferta(oferta)}
+                            className="h-8 w-8 p-0 hover:bg-slate-100"
+                          >
+                            <Pencil className="h-4 w-4 text-slate-600" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleEliminarOferta(oferta)}
+                            className="h-8 w-8 p-0 hover:bg-red-50"
+                          >
+                            <Trash2 className="h-4 w-4 text-red-600" />
+                          </Button>
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 text-xs text-slate-600">
-                        <Calendar className="h-3.5 w-3.5" />
-                        <span>
-                          {formatDate(oferta.dates.validFrom)} → {formatDate(oferta.dates.validTo)}
+                      {/* Descripción */}
+                      {oferta.description && (
+                        <p className="text-sm text-slate-600 line-clamp-2">
+                          {oferta.description}
+                        </p>
+                      )}
+
+                      {/* Badges de información */}
+                      <div className="flex flex-wrap gap-2">
+                        <span className={cn(
+                          "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border",
+                          statusStyle.bg,
+                          statusStyle.text,
+                          statusStyle.border
+                        )}>
+                          <Tag className="h-3 w-3" />
+                          {TIPO_LABELS[oferta.type] || oferta.type}
                         </span>
+
+                        <span className={cn(
+                          "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border capitalize",
+                          statusStyle.bg,
+                          statusStyle.text,
+                          statusStyle.border
+                        )}>
+                          {oferta.status === "draft" && "Borrador"}
+                          {oferta.status === "active" && "Activa"}
+                          {oferta.status === "inactive" && "Inactiva"}
+                        </span>
+                      </div>
+
+                      {/* Información adicional */}
+                      <div className="space-y-2 pt-2 border-t border-slate-100">
+                        <div className="flex items-center gap-2 text-xs text-slate-600">
+                          <Building2 className="h-3.5 w-3.5" />
+                          <span className="font-medium">{empresaNombre}</span>
+                        </div>
+
+                        <div className="flex items-center gap-2 text-xs text-slate-600">
+                          <Calendar className="h-3.5 w-3.5" />
+                          <span>
+                            {formatDate(oferta.dates.validFrom)} → {formatDate(oferta.dates.validTo)}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              );
-            })
-          )}
-        </div>
+                );
+              })
+            )}
+          </div>
+          {/* Paginación */}
+          <div className="flex justify-center items-center gap-4 mt-6">
+            <Button
+              variant="outline"
+              disabled={page === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              Anterior
+            </Button>
+            <span className="text-sm text-slate-700">
+              Página {page + 1} de {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              disabled={page + 1 >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+            >
+              Siguiente
+            </Button>
+          </div>
+        </>
       )}
 
       {editorOpen && (

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 
 export default function ProductQuantityModal({
   open,
@@ -13,6 +14,8 @@ export default function ProductQuantityModal({
   price,
   initialQty = 1,
   onConfirm,
+  priceSource,
+  priceListName,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -20,6 +23,8 @@ export default function ProductQuantityModal({
   price: number;
   initialQty?: number;
   onConfirm: (qty: number) => void;
+  priceSource?: "lista" | "default" | "base";
+  priceListName?: string;
 }) {
   const [qty, setQty] = useState(initialQty);
 
@@ -46,9 +51,28 @@ export default function ProductQuantityModal({
 
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <div className="text-sm text-muted-foreground">Precio unitario</div>
+            <div className="text-sm text-muted-foreground flex items-center gap-2">
+              Precio unitario
+              {priceSource && priceSource !== "base" && (
+                <Badge 
+                  variant="outline" 
+                  className={priceSource === "lista" 
+                    ? "bg-blue-50 text-blue-700 border-blue-200" 
+                    : "bg-gray-50 text-gray-700 border-gray-200"
+                  }
+                >
+                  {priceSource === "lista" ? "Lista cliente" : "Lista default"}
+                </Badge>
+              )}
+            </div>
             <div className="font-semibold">Q{price.toFixed(2)}</div>
           </div>
+          
+          {priceListName && (
+            <div className="text-xs text-muted-foreground -mt-2">
+              Precio de: {priceListName}
+            </div>
+          )}
 
           <div className="flex items-stretch gap-2">
             <Button type="button" variant="secondary" onClick={dec} className="px-3">−</Button>

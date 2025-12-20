@@ -30,7 +30,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="container mx-auto px-2 pt-3">
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
@@ -42,7 +42,7 @@ export default function SettingsPage() {
         <div className="flex items-center gap-4">
           <div className="text-right">
             <p className="font-medium">{user?.username}</p>
-            <p className="text-sm text-muted-foreground">{user?.role.name}</p>
+            <p className="text-sm text-muted-foreground">{user?.role?.name}</p>
           </div>
           <Button variant="outline" onClick={logout}>
             <LogOut className="h-4 w-4 mr-2" />

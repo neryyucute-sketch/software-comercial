@@ -17,6 +17,7 @@ type Props = {
 };
 
 type Criterio = "product" | "provider" | "line";
+type PackState = NonNullable<OfferDef["pack"]>;
 
 export function OfferTabProducts({
   draft,
@@ -26,6 +27,45 @@ export function OfferTabProducts({
   lineas,
 }: Props) {
   const router = useRouter();
+  const isPackOffer = draft.type === "combo" || draft.type === "kit";
+  const isKitOffer = draft.type === "kit";
+  const isComboOffer = draft.type === "combo";
+  const [addMode, setAddMode] = useState<"fixed" | "variable">("fixed");
+
+  useEffect(() => {
+    if (isKitOffer && addMode !== "fixed") {
+      setAddMode("fixed");
+    }
+  }, [isKitOffer, addMode]);
+
+  const ensurePack = (pack?: PackState): PackState => ({
+    precioFijo: pack?.precioFijo ?? 0,
+    cantidadTotalProductos: pack?.cantidadTotalProductos ?? 1,
+    itemsFijos: pack?.itemsFijos ?? [],
+    itemsVariablesPermitidos: pack?.itemsVariablesPermitidos ?? [],
+  });
+
+  const patchPack = (mutator: (current: PackState) => PackState) => {
+    update((d) => {
+      const current = ensurePack(d.pack as PackState | undefined);
+      let nextPack = mutator(current);
+      if (d.type === "kit") {
+        const totalFijos = nextPack.itemsFijos.reduce(
+          (acc, item) => acc + Number(item.unidades ?? 0),
+          0
+        );
+        nextPack = {
+          ...nextPack,
+          itemsVariablesPermitidos: [],
+          cantidadTotalProductos: totalFijos,
+        };
+      }
+      return {
+        ...d,
+        pack: nextPack,
+      };
+    });
+  };
 
   // 👇 DEBUG: Ver qué props llegan
   console.log('🔍 OfferTabProducts props:', {
@@ -90,6 +130,35 @@ export function OfferTabProducts({
   
   const [productosMap, setProductosMap] = useState<Map<string, any>>(new Map());
   const codigosProductoSeleccionados: string[] = draft.products ?? [];
+  const packFixedItems = draft.pack?.itemsFijos ?? [];
+  const packVariableItems = isKitOffer ? [] : (draft.pack?.itemsVariablesPermitidos ?? []);
+  const packFixedUnits = packFixedItems.reduce(
+    (acc, item) => acc + Number(item.unidades ?? 0),
+    0
+  );
+  const packTotalUnits = isKitOffer ? packFixedUnits : (draft.pack?.cantidadTotalProductos ?? 0);
+  const packPendingUnits = isComboOffer
+    ? Math.max(0, packTotalUnits - packFixedUnits)
+    : 0;
+  const packProductIds = useMemo(() => {
+    const fixed = packFixedItems.map((item) => item.productoId).filter(Boolean);
+    const variable = packVariableItems.map((item) => item.productoId).filter(Boolean);
+    return [...fixed, ...variable];
+  }, [packFixedItems, packVariableItems]);
+  const referencedProductIds = useMemo(() => {
+    return isPackOffer ? packProductIds : codigosProductoSeleccionados;
+  }, [isPackOffer, packProductIds, codigosProductoSeleccionados]);
+
+  const filterActiveProducts = useCallback((list: any[] = []) => {
+    return list.filter((p) => {
+      const rawStatus = p.status ?? p.estado;
+      if (rawStatus === undefined || rawStatus === null) return true;
+      const normalized = String(rawStatus).trim().toLowerCase();
+      if (!normalized) return true;
+      if (["inactivo", "inactive", "0", "false", "no"].includes(normalized)) return false;
+      return true;
+    });
+  }, []);
   
   // Calcular hasMore basado en page y totalPages
   const hasMore = page + 1 < totalPages;
@@ -130,7 +199,8 @@ export function OfferTabProducts({
         const data = await res.json();
         
         if (!ignore) {
-          const items = data.content ?? [];
+          const rawItems = data.content ?? [];
+          const items = filterActiveProducts(rawItems);
           const total = data.totalPages ?? 1;
           
           console.log('[DEBUG] Primera carga:', { items: items.length, totalPages: total, page: 0 });
@@ -174,7 +244,7 @@ export function OfferTabProducts({
       ignore = true;
       controller.abort();
     };
-  }, [queryProducto, router]);
+  }, [queryProducto, router, filterActiveProducts]);
 
   const loadMore = useCallback(async () => {
     console.log('[DEBUG] loadMore llamado:', { page, totalPages, hasMore, loadingProductos });
@@ -209,7 +279,8 @@ export function OfferTabProducts({
       }
       
       const data = await res.json();
-      const items = data.content ?? [];
+      const rawItems = data.content ?? [];
+      const items = filterActiveProducts(rawItems);
       
       console.log('[DEBUG] Datos recibidos:', { items: items.length, page: nextPage });
       
@@ -232,7 +303,7 @@ export function OfferTabProducts({
     } finally {
       setLoadingProductos(false);
     }
-  }, [page, totalPages, hasMore, loadingProductos, queryProducto, router]);
+  }, [page, totalPages, hasMore, loadingProductos, queryProducto, router, filterActiveProducts]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -282,6 +353,92 @@ export function OfferTabProducts({
     }));
   };
 
+  const rememberProduct = (producto: any) => {
+    const codigo = producto.codigoProducto ?? producto.codigo;
+    if (!codigo) return;
+    setProductosMap((prev) => {
+      const next = new Map(prev);
+      if (!next.has(codigo)) {
+        next.set(codigo, producto);
+      }
+      return next;
+    });
+  };
+
+  const handleAddFixedProduct = (producto: any) => {
+    const codigo = producto.codigoProducto ?? producto.codigo;
+    if (!codigo) return;
+    rememberProduct(producto);
+    patchPack((current) => {
+      if (current.itemsFijos.some((it) => it.productoId === codigo)) {
+        return current;
+      }
+      return {
+        ...current,
+        itemsVariablesPermitidos: current.itemsVariablesPermitidos.filter(
+          (it) => it.productoId !== codigo
+        ),
+        itemsFijos: [
+          ...current.itemsFijos,
+          {
+            productoId: codigo,
+            unidades: 1,
+            descripcion: producto.descripcion ?? producto.nombre ?? codigo,
+          },
+        ],
+      };
+    });
+  };
+
+  const handleAddVariableProduct = (producto: any) => {
+    if (isKitOffer) return;
+    const codigo = producto.codigoProducto ?? producto.codigo;
+    if (!codigo) return;
+    rememberProduct(producto);
+    patchPack((current) => {
+      if (current.itemsVariablesPermitidos.some((it) => it.productoId === codigo)) {
+        return current;
+      }
+      return {
+        ...current,
+        itemsVariablesPermitidos: [
+          ...current.itemsVariablesPermitidos,
+          {
+            productoId: codigo,
+            descripcion: producto.descripcion ?? producto.nombre ?? codigo,
+          },
+        ],
+      };
+    });
+  };
+
+  const handleUpdateFixedQty = (productId: string, raw: number) => {
+    const unidades = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+    patchPack((current) => ({
+      ...current,
+      itemsFijos: current.itemsFijos.map((it) =>
+        it.productoId === productId ? { ...it, unidades } : it
+      ),
+    }));
+  };
+
+  const handleRemoveFixedProduct = (productId: string) => {
+    patchPack((current) => ({
+      ...current,
+      itemsFijos: current.itemsFijos.filter((it) => it.productoId !== productId),
+    }));
+  };
+
+  const handleRemoveVariableProduct = (productId: string) => {
+    if (isKitOffer) return;
+    patchPack((current) => ({
+      ...current,
+      itemsVariablesPermitidos: current.itemsVariablesPermitidos.filter(
+        (it) => it.productoId !== productId
+      ),
+    }));
+  };
+
   useEffect(() => {
     if (productosRemote.length === 0) return;
     setProductosMap((prev) => {
@@ -295,7 +452,8 @@ export function OfferTabProducts({
   }, [productosRemote]);
 
   useEffect(() => {
-    const faltantes = (draft.products ?? []).filter((code) => !productosMap.has(code));
+    if (referencedProductIds.length === 0) return;
+    const faltantes = referencedProductIds.filter((code) => code && !productosMap.has(code));
     if (faltantes.length === 0) return;
 
     const controller = new AbortController();
@@ -335,7 +493,7 @@ export function OfferTabProducts({
 
     fetchMissing();
     return () => controller.abort();
-  }, [draft.products, productosMap]);
+  }, [referencedProductIds, productosMap]);
 
   // =========================================================
   //  CRITERIO: PROVEEDOR
@@ -404,6 +562,258 @@ export function OfferTabProducts({
       },
     }));
   };
+
+  if (isPackOffer) {
+    const packLabel = draft.type === "combo" ? "combo" : "kit";
+    return (
+      <div className="space-y-4">
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="text-sm font-semibold text-slate-700">
+            Productos del {packLabel}
+          </div>
+          <p className="text-xs text-slate-600 mt-1">
+            {isKitOffer
+              ? "Los kits se componen únicamente de productos fijos. La cantidad total se calcula con la suma de sus unidades."
+              : "Define qué SKUs son fijos y cuáles quedan habilitados como variables. Las unidades fijas no pueden exceder el cupo total."}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <label className="block text-sm font-semibold text-slate-700">
+                Buscar productos
+              </label>
+              {isComboOffer ? (
+                <div className="inline-flex rounded-full border border-slate-200 bg-slate-100 text-[11px]">
+                  {([
+                    ["fixed", "Items fijos"],
+                    ["variable", "Variables"],
+                  ] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setAddMode(mode)}
+                      className={cn(
+                        "px-3 py-1 font-semibold rounded-full transition-colors",
+                        addMode === mode
+                          ? "bg-amber-600 text-white"
+                          : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <span className="rounded-full bg-amber-600 px-3 py-1 text-[11px] font-semibold text-white">
+                  Solo productos fijos
+                </span>
+              )}
+            </div>
+            <Input
+              value={queryProducto}
+              onChange={(e) => setQueryProducto(e.target.value)}
+              placeholder="Escribe al menos 2 caracteres…"
+              className="text-sm"
+            />
+
+            <div className="h-64 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 text-xs">
+              {loadingProductos && productosRemote.length === 0 && (
+                <div className="px-3 py-2 text-slate-400">Buscando productos…</div>
+              )}
+
+              {!loadingProductos && queryProducto.trim().length < 2 && (
+                <div className="px-3 py-2 text-slate-400">
+                  Escribe al menos 2 caracteres para buscar.
+                </div>
+              )}
+
+              {!loadingProductos && queryProducto.trim().length >= 2 && productosRemote.length === 0 && (
+                <div className="px-3 py-2 text-slate-400">
+                  No se encontraron productos.
+                </div>
+              )}
+
+              {productosRemote.map((p) => {
+                const codigo = p.codigoProducto ?? p.codigo;
+                const desc = p.descripcion ?? p.nombre ?? "";
+                const yaFijo = packFixedItems.some((it) => it.productoId === codigo);
+                const yaVariable = isKitOffer
+                  ? false
+                  : packVariableItems.some((it) => it.productoId === codigo);
+                const yaEnPack = yaFijo || yaVariable;
+
+                return (
+                  <div
+                    key={codigo}
+                    className={cn(
+                      "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
+                      yaFijo
+                        ? "bg-amber-50"
+                        : yaVariable
+                        ? "bg-emerald-50"
+                        : "hover:bg-slate-100"
+                    )}
+                  >
+                    <span className="flex-1 min-w-0">
+                      <span className="font-semibold text-slate-800">{codigo}</span>
+                      <span className="ml-2 text-slate-600">— {desc}</span>
+                    </span>
+                    {yaEnPack ? (
+                      <span className={cn(
+                        "flex-shrink-0 px-3 py-1 text-xs rounded-md font-semibold",
+                        yaFijo
+                          ? "bg-amber-600 text-white"
+                          : "bg-emerald-600 text-white"
+                      )}>
+                        {yaFijo ? "Fijo" : "Variable"}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          isKitOffer || addMode === "fixed"
+                            ? handleAddFixedProduct(p)
+                            : handleAddVariableProduct(p)
+                        }
+                        className="flex-shrink-0 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-md font-medium"
+                      >
+                        {isKitOffer
+                          ? "Agregar fijo"
+                          : addMode === "fixed"
+                          ? "Agregar fijo"
+                          : "Permitir"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+
+              {hasMore && queryProducto.trim().length >= 2 && productosRemote.length > 0 && (
+                <div ref={observerTarget} className="px-3 py-2 text-center">
+                  {loadingProductos ? (
+                    <span className="text-slate-400 text-xs">Cargando más…</span>
+                  ) : (
+                    <span className="text-slate-300 text-xs">
+                      ↓ Scroll para más (página {page + 1} de {totalPages})
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+              <div className="font-semibold mb-2">Resumen del {packLabel}</div>
+              <div className="flex flex-wrap gap-4 text-xs text-slate-600">
+                <span>
+                  Unidades fijas: {packFixedUnits}/{packTotalUnits}
+                </span>
+                {isComboOffer ? (
+                  <>
+                    <span>Pendientes por definir: {packPendingUnits}</span>
+                    <span>Variables permitidos: {packVariableItems.length}</span>
+                  </>
+                ) : (
+                  <span>Los kits no admiten variables</span>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold text-slate-700 mb-3">
+                Items fijos ({packFixedItems.length})
+              </div>
+
+              {packFixedItems.length === 0 ? (
+                <div className="h-48 flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-400 text-sm">
+                  Sin productos fijos aún
+                </div>
+              ) : (
+                <div className="h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                  {packFixedItems.map((item) => {
+                    const producto = productosMap.get(item.productoId);
+                    const desc = producto?.descripcion ?? producto?.nombre ?? item.descripcion ?? "";
+                    return (
+                      <div
+                        key={item.productoId}
+                        className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="font-semibold text-amber-900">{item.productoId}</div>
+                          {desc && <div className="text-slate-700 mt-0.5 text-[13px]">{desc}</div>}
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] uppercase text-slate-500">
+                          <span>Cant.</span>
+                          <Input
+                            type="number"
+                            min="1"
+                            className="w-20"
+                            value={item.unidades ?? 1}
+                            onChange={(e) =>
+                              handleUpdateFixedQty(item.productoId, Number(e.target.value))
+                            }
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="flex-shrink-0 text-red-600 hover:text-red-800 font-bold text-lg leading-none"
+                          onClick={() => handleRemoveFixedProduct(item.productoId)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {isComboOffer && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="text-sm font-semibold text-slate-700 mb-3">
+                  Items variables permitidos ({packVariableItems.length})
+                </div>
+
+                {packVariableItems.length === 0 ? (
+                  <div className="h-40 flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-slate-400 text-sm">
+                    Sin variables disponibles todavía
+                  </div>
+                ) : (
+                  <div className="h-40 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                    {packVariableItems.map((item) => {
+                      const producto = productosMap.get(item.productoId);
+                      const desc = producto?.descripcion ?? producto?.nombre ?? item.descripcion ?? "";
+                      return (
+                        <div
+                          key={item.productoId}
+                          className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="font-semibold text-emerald-900">{item.productoId}</div>
+                            {desc && <div className="text-slate-700 mt-0.5 text-[13px]">{desc}</div>}
+                          </div>
+                          <button
+                            type="button"
+                            className="flex-shrink-0 text-red-600 hover:text-red-800 font-bold text-lg leading-none"
+                            onClick={() => handleRemoveVariableProduct(item.productoId)}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // =========================================================
   return (
@@ -606,7 +1016,7 @@ export function OfferTabProducts({
                 
                 return (
                   <div
-                    key={p.id}
+                    key={p.id || p.codigo}
                     className={cn(
                       "flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 last:border-0",
                       yaSeleccionado ? "bg-emerald-50" : "hover:bg-slate-100"

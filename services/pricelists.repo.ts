@@ -60,35 +60,75 @@ const isOnline = () =>
 function mapBackendToPriceList(data: any): PriceList | null {
   let detalle: any = {}
   const rawDetalle = data.listaPrecioDetalle || data.ofertaDetalle
+  const toSearchText = () => {
+    if (typeof rawDetalle === "string") return rawDetalle
+    try {
+      return JSON.stringify(rawDetalle ?? data ?? {})
+    } catch {
+      return ""
+    }
+  }
 
   if (rawDetalle) {
     try {
       detalle = typeof rawDetalle === "string" ? JSON.parse(rawDetalle) : rawDetalle
+      // Si viene anidado como listaPrecioDetalle dentro del detalle, lo aplanamos
+      if (detalle && detalle.listaPrecioDetalle) {
+        const innerRaw = detalle.listaPrecioDetalle
+        const inner = typeof innerRaw === "string" ? JSON.parse(innerRaw) : innerRaw
+        detalle = { ...detalle, ...inner }
+      }
     } catch (e) {
       console.error("Error parseando listaPrecioDetalle:", e)
     }
   }
 
-  const products = detalle.products || data.products || {}
-  const tier = detalle.tier ?? data.tier ?? 0
-  const name = detalle.name || data.name || data.descripcion || "Lista precio"
+  const products = detalle.products || (detalle.listaPrecioDetalle && detalle.listaPrecioDetalle.products) || data.products || {}
+  const code = data.codigoListaPrecio || detalle.codigoListaPrecio || undefined
+  const inferredTier = () => {
+    const fromCode = Number.isFinite(Number(code)) ? Number(code) : undefined
+    return detalle.tier ?? data.tier ?? fromCode ?? 0
+  }
+  const tier = inferredTier()
+  const name =
+    detalle.name ||
+    data.name ||
+    data.descripcion ||
+    (tier === 0 ? "Lista precio default" : `Lista precio ${tier}`)
   const companyId = detalle.codigoEmpresa || data.codigoEmpresa || "general"
   const isActive = (data.estado || detalle.status || data.status || "active").toLowerCase() === "active"
+  const serverIdTopRaw = data.uuidListaPrecio || data.uuid_lista_precio || data.uuid || data.id || data.idt?.toString()
+  const serverIdDetailRaw = detalle.uuidListaPrecio || detalle.id
+  const serverIdTop = serverIdTopRaw && serverIdTopRaw !== code ? serverIdTopRaw : undefined
+  const serverIdDetail = serverIdDetailRaw && serverIdDetailRaw !== code ? serverIdDetailRaw : undefined
+  let serverId = serverIdTop || serverIdDetail || undefined
+  if (!serverId) {
+    // Busca un UUID v4 en cualquier parte del payload/JSON recibido
+    const text = toSearchText()
+    const match = text.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/)
+    if (match) serverId = match[0]
+  }
+  const id = serverId || data.idt?.toString() || code || name
 
   return {
-    id: data.codigoListaPrecio || detalle.id || data.uuidListaPrecio || data.idt?.toString() || name,
+    id,
+    serverId,
     name,
     companyId,
     tier,
     products,
     isActive,
     createdAt: new Date(detalle.createdAt || data.fechaCreacion || data.fechaModificacion || nowIso()),
+    code,
   }
 }
 
 function buildPayload(list: PriceList) {
+  const codigoListaPrecio = (list as any).code || ((list.tier ?? 0) === 0 ? "default" : String(list.tier ?? 0))
+  const uuidListaPrecio = (list as any).serverId || undefined
   const detalle = {
-    id: list.id,
+    id: uuidListaPrecio,
+    codigoListaPrecio,
     codigoEmpresa: list.companyId,
     type: "lista-precio",
     name: list.name,
@@ -100,7 +140,8 @@ function buildPayload(list: PriceList) {
 
   return {
     codigoEmpresa: list.companyId,
-    codigoListaPrecio: list.id,
+    codigoListaPrecio,
+    ...(uuidListaPrecio ? { uuidListaPrecio } : {}),
     estado: list.isActive ? "active" : "inactive",
     fechaCreacion: nowIso(),
     fechaModificacion: nowIso(),
@@ -114,31 +155,36 @@ export async function getPriceListsOnline(codigoEmpresa: string): Promise<PriceL
   const token = await getAccessToken()
   const base = API.replace(/\/$/, "")
   const company = encodeURIComponent(codigoEmpresa || "")
-  // Solo GET para evitar inserciones accidentales; probamos dos rutas de lectura.
-  const urls = [
-    `${base}${ENDPOINT}?codigoEmpresa=${company}&page=0&size=500`,
-    `${base}${ENDPOINT}/${company}?page=0&size=500`,
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    "x-codigo-empresa": codigoEmpresa,
+  }
+
+  // Solo intentamos llamadas GET; el POST se reservaba para crear listas y provocaba inserciones accidentales en la consulta.
+  const attempts: Array<{ url: string; init?: RequestInit }> = [
+    { url: `${base}${ENDPOINT}?codigoEmpresa=${company}&page=0&size=500`, init: { method: "GET", headers } },
+    { url: `${base}${ENDPOINT}/${company}?page=0&size=500`, init: { method: "GET", headers } },
   ]
 
   let res: Response | null = null
-  for (const url of urls) {
-    res = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        "x-codigo-empresa": codigoEmpresa,
-      },
-    })
-    if (res.ok) break
+  const errors: string[] = []
+
+  for (const attempt of attempts) {
+    try {
+      res = await fetch(attempt.url, attempt.init)
+      if (res.ok) break
+      errors.push(`HTTP ${res.status} (${attempt.init?.method || "GET"}) ${attempt.url}`)
+    } catch (e: any) {
+      errors.push(`${attempt.init?.method || "GET"} ${attempt.url}: ${e?.message || e}`)
+    }
   }
 
   if (!res || !res.ok) {
     const last = res ? `HTTP ${res.status}: ${await res.text()}` : "Sin respuesta"
-    throw new Error(last)
-  }
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+    const detail = errors.length ? ` | intentos: ${errors.join("; ")}` : ""
+    throw new Error(`${last}${detail}`)
   }
 
   const data: any = await res.json().catch(() => ({}))
@@ -188,18 +234,22 @@ export async function updatePriceListOnline(draft: PriceList): Promise<PriceList
 
   const token = await getAccessToken()
   const base = API.replace(/\/$/, "")
-  const uuid = encodeURIComponent((draft as any).serverId || draft.id)
-  const company = encodeURIComponent(draft.companyId || "")
-  const url = `${base}${ENDPOINT}/${company}/${uuid}`
+  const uuidRaw = (draft as any).serverId
+  if (!uuidRaw) {
+    throw new Error("No se encontró uuidListaPrecio. Sincroniza listas y vuelve a intentar.")
+  }
 
-  const res = await fetch(url, {
+  const uuid = encodeURIComponent(uuidRaw)
+  const payload = JSON.stringify(buildPayload(draft))
+
+  const res = await fetch(`${base}${ENDPOINT}/${uuid}`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
       "x-codigo-empresa": draft.companyId || "",
     },
-    body: JSON.stringify(buildPayload(draft)),
+    body: payload,
   })
 
   if (!res.ok) {
@@ -232,8 +282,17 @@ export async function deletePriceListOnline(uuid: string): Promise<void> {
 }
 
 export async function syncPriceListsFromBackend(codigoEmpresa: string): Promise<PriceList[]> {
-  const remote = await getPriceListsOnline(codigoEmpresa)
-  await replacePriceListsLocal(remote)
-  return remote
+  try {
+    const remote = await getPriceListsOnline(codigoEmpresa)
+    if (remote.length) {
+      await replacePriceListsLocal(remote)
+      return remote
+    }
+    console.warn("Sync devolvió vacío; se conserva cache local")
+    return getPriceListsLocal()
+  } catch (err) {
+    console.warn("Fallo al sincronizar listas; se mantiene cache local", err)
+    return getPriceListsLocal()
+  }
 }
 

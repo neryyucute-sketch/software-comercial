@@ -36,10 +36,6 @@ export default function ClientesPage() {
   const canUpdate = hasPermission("customers", "update");
 
   useEffect(() => {
-    loadClientesFromDB();
-  }, []);
-
-  useEffect(() => {
     const loadMotivos = async () => {
       try {
         const base = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10931/preventa/api/v1";

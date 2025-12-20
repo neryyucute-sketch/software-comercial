@@ -203,14 +203,32 @@ export type OrderItem = {
   descuentoLinea?: number;
   total?: number;
   // metadata opcional
-  priceSource?: "lista" | "oferta" | "base";
+  priceSource?: "lista" | "oferta" | "base" | "default";
+  priceListName?: string;
+  priceListId?: string;
+  priceListCode?: string;
+  codigoProveedor?: string | null;
+  nombreProveedor?: string | null;
+  codigoLinea?: string | null;
+  nombreLinea?: string | null;
   comboId?: string | null;
   kitId?: string | null;
+  comboGroupId?: string | null;
+  comboCode?: string | null;
+  comboName?: string | null;
+  comboPackPrice?: number;
+  comboPacksQty?: number;
+  comboType?: "combo" | "kit";
   esBonificacion?: boolean;
   promoBonificacionId?: string;
   ofertaIdAplicada?: string;
   ofertaNombre?: string;
-  tipoOferta?: "discount" | "bonus";
+  ofertaCodigo?: string | null;
+  codigoOferta?: string | null;
+  tipoOferta?: "discount" | "bonus" | "combo" | "kit" | "pricelist" | "lista";
+  parentItemId?: string | null;
+  relatedItemIds?: string[];
+  lineNumber?: number;
 };
 
 export type OrderStatus =
@@ -298,6 +316,8 @@ export interface PriceList {
   products: Record<string, number>
   isActive: boolean
   createdAt: Date
+  serverId?: string
+  code?: string
 }
 
 // Permisos / Auth
@@ -400,7 +420,7 @@ export interface PriceListRow {
   tier?: number;
   scope?: any;
   version?: number;
-  updatedAt: string;
+  serverId?: string
   deleted?: boolean;
   dirty?: boolean;
   serverId?: string;

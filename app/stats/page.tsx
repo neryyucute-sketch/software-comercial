@@ -212,7 +212,7 @@ export default function StatsPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <main className="max-w-7xl mx-auto p-2 pt-3 sm:px-2 lg:px-4">
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-6">
             <h1 className="text-3xl font-bold text-gray-900">Estadísticas de Ventas</h1>

@@ -157,7 +157,7 @@ export default function VendorsPage() {
   }
 
   return (
-    <div className="container mx-auto p-6 pb-20">
+    <div className="container mx-auto p-2 pt-3 pb-20">
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold">Vendedores</h1>

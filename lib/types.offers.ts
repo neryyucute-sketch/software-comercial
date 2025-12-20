@@ -19,13 +19,17 @@ export type DiscountConfig = {
   perLine?: boolean;
 };
 
-export type BonusTargetType = "same" | "sku" | "linea" | "familia";
+export type BonusTargetType = "same" | "sku" | "linea" | "familia" | "proveedor";
 
 export type BonusTarget = {
   type: BonusTargetType;
   productId?: string;     // when type === "sku"
   lineaId?: string;       // when type === "linea"
   familiaId?: string;     // when type === "familia"
+  proveedorId?: string;   // when type === "proveedor"
+  productIds?: string[];
+  lineaIds?: string[];
+  proveedorIds?: string[];
   requiereSeleccionUsuario?: boolean;
 };
 
@@ -39,7 +43,15 @@ export type BonusConfig = {
   target?: BonusTarget;   // qué se bonifica
   sameAsQualifier?: boolean; // legacy flag
 };
-export type PackItem = { productId: string; qty: number; description?: string; };
+export type ComboFixedItem = { productoId: string; unidades: number; descripcion?: string };
+export type ComboVariableItem = { productoId: string; descripcion?: string };
+
+export type ComboPackConfig = {
+  precioFijo: number;
+  cantidadTotalProductos: number;
+  itemsFijos: ComboFixedItem[];
+  itemsVariablesPermitidos: ComboVariableItem[];
+};
 
 export type OfferScope = {
   canales?: string[];
@@ -59,6 +71,8 @@ export type OfferDef = {
   codigoEmpresa: string;
   type: OfferType;
   name: string;
+  referenceCode?: string;
+  codigoOferta?: string;
   description?: string;
   status: "draft"|"active"|"inactive";
   dates: {
@@ -74,9 +88,12 @@ export type OfferDef = {
   stackableWithSameProduct?: boolean;
   discount?: DiscountConfig;
   bonus?: BonusConfig;
-  pack?: { price: number; items: PackItem[] }; // precio general (no se distribuye)
+  pack?: ComboPackConfig;
   version?: number;
+  createdAt?: string;
+  createdBy?: string;
   updatedAt: string;
+  updatedBy?: string;
   deleted?: boolean;
   dirty?: boolean;
   serverId?: string;

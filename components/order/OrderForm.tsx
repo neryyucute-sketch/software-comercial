@@ -35,11 +35,15 @@ export default function OrderForm() {
     for (const ni of newItems) {
       const idx = next.findIndex((x) => x.productoId === ni.productoId && !x.comboId && !x.kitId);
       if (idx >= 0) {
-        const mergedQty = next[idx].cantidad + ni.cantidad;
+        const unit = Number.isFinite(ni.precioUnitario) ? ni.precioUnitario : next[idx].precioUnitario;
+        const bruto = Math.round(ni.cantidad * unit * 100) / 100;
         next[idx] = {
           ...next[idx],
-          cantidad: mergedQty,
-          subtotal: Math.round(mergedQty * next[idx].precioUnitario * 100) / 100,
+          ...ni,
+          id: next[idx].id,
+          cantidad: ni.cantidad,
+          precioUnitario: unit,
+          subtotal: bruto,
         };
       } else {
         next.push(ni);

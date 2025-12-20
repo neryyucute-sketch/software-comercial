@@ -65,8 +65,8 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <main className="max-w-2xl mx-auto py-6 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gray-50 pt-3">
+      <main className="max-w-2xl mx-auto py-2 sm:px-2 lg:px-4">
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-8">
             <h1 className="text-3xl font-bold text-gray-900">Mi Perfil</h1>

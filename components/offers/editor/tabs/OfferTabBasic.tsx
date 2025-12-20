@@ -21,6 +21,43 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
 
   const tiers = draft.discount?.tiers ?? [];
   const bonus = draft.bonus || {};
+  const isPackOffer = draft.type === "combo" || draft.type === "kit";
+  const isCombo = draft.type === "combo";
+  const isKit = draft.type === "kit";
+  const isReferenceLocked = Boolean(draft.referenceCode && draft.serverId);
+
+  const ensurePack = () => ({
+    precioFijo: draft.pack?.precioFijo ?? 0,
+    cantidadTotalProductos: draft.pack?.cantidadTotalProductos ?? 1,
+    itemsFijos: draft.pack?.itemsFijos ?? [],
+    itemsVariablesPermitidos: draft.pack?.itemsVariablesPermitidos ?? [],
+  });
+
+  const unidadesFijas = draft.pack?.itemsFijos?.reduce(
+    (acc, item) => acc + Number(item.unidades ?? 0),
+    0
+  ) ?? 0;
+  const totalCupos = isKit ? unidadesFijas : draft.pack?.cantidadTotalProductos ?? 0;
+  const unidadesPendientes = isCombo ? Math.max(0, totalCupos - unidadesFijas) : 0;
+
+  const updatePack = (partial: Partial<ReturnType<typeof ensurePack>>) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const base = {
+        precioFijo: d.pack?.precioFijo ?? 0,
+        cantidadTotalProductos: d.pack?.cantidadTotalProductos ?? 1,
+        itemsFijos: d.pack?.itemsFijos ?? [],
+        itemsVariablesPermitidos: d.pack?.itemsVariablesPermitidos ?? [],
+      };
+      return {
+        ...d,
+        pack: {
+          ...base,
+          ...partial,
+        },
+      };
+    });
+  };
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -220,10 +257,37 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
               className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/70"
               value={draft.type}
               onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  type: e.target.value as typeof d.type,
-                }))
+                setDraft((d) => {
+                  const nextType = e.target.value as typeof d.type;
+                  const next = {
+                    ...d,
+                    type: nextType,
+                  } as typeof d;
+                  if (nextType === "combo" || nextType === "kit") {
+                    const basePack = {
+                      precioFijo: d.pack?.precioFijo ?? 0,
+                      cantidadTotalProductos: d.pack?.cantidadTotalProductos ?? 1,
+                      itemsFijos: d.pack?.itemsFijos ?? [],
+                      itemsVariablesPermitidos: d.pack?.itemsVariablesPermitidos ?? [],
+                    };
+                    if (nextType === "kit") {
+                      const unidades = basePack.itemsFijos.reduce(
+                        (acc, item) => acc + Number(item.unidades ?? 0),
+                        0
+                      );
+                      basePack.itemsVariablesPermitidos = [];
+                      basePack.cantidadTotalProductos = unidades;
+                    }
+                    next.pack = basePack;
+                  }
+                  if (nextType === "discount") {
+                    next.bonus = undefined;
+                  }
+                  if (nextType === "bonus") {
+                    next.discount = undefined;
+                  }
+                  return next;
+                })
               }
             >
               <option value="bonus">Bonificación</option>
@@ -324,6 +388,25 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
               Si está activo, esta oferta puede coexistir con otras que afecten los mismos productos. De lo contrario, se considerará exclusiva por producto.
             </p>
           </div>
+        </div>
+
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3">
+          <Label>Código de oferta</Label>
+          <Input
+            className="mt-1 uppercase"
+            placeholder="Ej. OFERTA-001"
+            value={draft.referenceCode || ""}
+            disabled={isReferenceLocked}
+            onChange={(e) => {
+              const next = e.target.value?.toUpperCase();
+              setDraft((d) => ({ ...d, referenceCode: next }));
+            }}
+          />
+          <p className="mt-1 text-xs text-amber-900">
+            Este código aparece en los pedidos y PDF para que el equipo identifique la promoción.
+            {isPackOffer ? " Los combos y kits lo necesitan para agrupar los productos." : " Úsalo para referenciar descuentos, bonificaciones o listas negociadas."}
+            {isReferenceLocked && " Este código proviene del backend y no puede modificarse."}
+          </p>
         </div>
       </div>
 
@@ -434,6 +517,74 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Combo / Kit */}
+      {isPackOffer && (
+        <div className="grid gap-4 rounded-xl border border-amber-200 bg-amber-50/80 p-4">
+          <div>
+            <div className="text-sm font-semibold text-amber-900">
+              Configuración general del {draft.type === "combo" ? "combo" : "kit"}
+            </div>
+            <p className="text-xs text-amber-800/80">
+              {isCombo
+                ? "Define el precio fijo y la cantidad total de productos que debe entregar el combo."
+                : "Define el precio fijo del kit; la cantidad total se calcula con los productos fijos ingresados."}
+            </p>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div>
+              <Label>Precio fijo (Q)</Label>
+              <Input
+                type="number"
+                className="mt-1"
+                min="0"
+                step="0.01"
+                value={draft.pack?.precioFijo ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value ? Number(e.target.value) : 0;
+                  updatePack({ precioFijo: value });
+                }}
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <Label>Cantidad total de productos</Label>
+              <Input
+                type="number"
+                className="mt-1"
+                min="1"
+                value={isKit ? unidadesFijas : draft.pack?.cantidadTotalProductos ?? ""}
+                readOnly={isKit}
+                onChange={(e) => {
+                  if (isKit) return;
+                  const value = e.target.value ? Number(e.target.value) : 0;
+                  updatePack({ cantidadTotalProductos: value });
+                }}
+                placeholder="Ej. 12"
+              />
+              {isKit && (
+                <p className="mt-1 text-xs text-amber-800">
+                  Para los kits se suma automáticamente lo configurado en los productos fijos.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-200 bg-white p-3 text-xs text-amber-900">
+            <div className="font-semibold text-sm">Resumen de cupos</div>
+            <div className="mt-1 flex flex-wrap gap-4 text-amber-800">
+              <span>Fijos definidos: <strong>{unidadesFijas}</strong></span>
+              <span>Total requerido: <strong>{totalCupos || "-"}</strong></span>
+              {isCombo ? (
+                <span>Pendientes para variables: <strong>{unidadesPendientes}</strong></span>
+              ) : (
+                <span>Los kits no admiten productos variables.</span>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -566,7 +717,17 @@ export function OfferTabBasic({ editor, proveedores, lineas }: Props) {
                 type="checkbox"
                 className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                 checked={!!bonus.target?.requiereSeleccionUsuario}
-                onChange={(e) => updateBonus({ target: { ...(bonus.target || { type: bonus.target?.type || "linea" }), requiereSeleccionUsuario: e.target.checked } })}
+                onChange={(e) => {
+                  const currentLineaTarget =
+                    bonus.target?.type === "linea" ? bonus.target : undefined;
+                  updateBonus({
+                    target: {
+                      ...(currentLineaTarget ?? {}),
+                      type: "linea",
+                      requiereSeleccionUsuario: e.target.checked,
+                    },
+                  });
+                }}
               />
               <div className="space-y-1">
                 <Label htmlFor="requiereSeleccionUsuario">Requiere seleccionar SKU</Label>

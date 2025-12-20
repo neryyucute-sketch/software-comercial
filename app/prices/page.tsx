@@ -6,6 +6,13 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+  SelectValue,
+} from "@/components/ui/select"
 import { PriceListForm } from "@/components/price-list-form"
 import { useAuth } from "@/contexts/AuthContext"
 import { usePreventa } from "@/contexts/preventa-context"
@@ -18,8 +25,21 @@ const productName = (product: Product | any) =>
   product.descripcion || product.descripcionCorta || product.name || product.codigoProducto || "Producto"
 const normalizeStr = (val: any) => (typeof val === "string" ? val.trim() : val ? String(val) : "")
 const productProvider = (product: Product | any) =>
+  normalizeStr(product.codigoProveedor || product.proveedor) || "Sin proveedor"
+const productProviderLabel = (product: Product | any) =>
   normalizeStr(product.proveedor || product.codigoProveedor) || "Sin proveedor"
 const productLine = (product: Product | any) =>
+  normalizeStr(
+    product.codigoFiltroVenta ||
+      product.filtroVenta ||
+      product.codigoLinea ||
+      product.linea ||
+      product.codigoSubfamilia ||
+      product.subfamilia ||
+      product.codigoFamilia ||
+      product.familia,
+  ) || "Sin línea"
+const productLineLabel = (product: Product | any) =>
   normalizeStr(
     product.filtroVenta ||
       product.codigoFiltroVenta ||
@@ -28,18 +48,20 @@ const productLine = (product: Product | any) =>
       product.subfamilia ||
       product.codigoSubfamilia ||
       product.familia ||
-      product.codigoFamilia ||
-      product.codigoFiltroVenta,
+      product.codigoFamilia,
   ) || "Sin línea"
 const productBasePrice = (product: Product | any) => product.precio ?? product.price ?? 0
+const getPriceListCode = (tier: number) => (tier === 0 ? "default" : String(tier))
 
 export default function PricesPage() {
-  const { priceLists, products, updatePriceList, addPriceList, syncPriceLists } = usePreventa()
+  const { priceLists, products, updatePriceList, addPriceList, loadPriceListsOnline } = usePreventa()
   const { hasPermission } = useAuth()
 
   const [searchTerm, setSearchTerm] = useState("")
-  const [providerFilter, setProviderFilter] = useState("")
   const [lineFilter, setLineFilter] = useState("")
+  const [showAllProducts, setShowAllProducts] = useState(false)
+  const [lineSearch, setLineSearch] = useState("")
+  const [openLineSelect, setOpenLineSelect] = useState(false)
   const [selectedCompany, setSelectedCompany] = useState("E01")
   const [targetListId, setTargetListId] = useState<string | null>(null)
   const [applyToVariations, setApplyToVariations] = useState(false)
@@ -53,11 +75,13 @@ export default function PricesPage() {
   const [remoteProducts, setRemoteProducts] = useState<Product[]>([])
   const [remoteLoaded, setRemoteLoaded] = useState(false)
   const [isLoadingProducts, setIsLoadingProducts] = useState(false)
+  const [productsCache, setProductsCache] = useState<Record<string, Product[]>>({})
   const [isSyncingLists, setIsSyncingLists] = useState(false)
+  const [catalogLines, setCatalogLines] = useState<{ codigo: string; descripcion: string; codigoPadre?: string }[]>([])
 
   const hasProductFilter = useMemo(
-    () => searchTerm.trim().length >= 2 || Boolean(providerFilter) || Boolean(lineFilter),
-    [searchTerm, providerFilter, lineFilter],
+    () => searchTerm.trim().length >= 2 || Boolean(lineFilter),
+    [searchTerm, lineFilter],
   )
 
   const canRead = hasPermission("prices", "read")
@@ -65,116 +89,164 @@ export default function PricesPage() {
   const canUpdate = hasPermission("prices", "update")
 
   const activeProducts = useMemo(() => {
-    if (!hasProductFilter) return []
-    const source = remoteLoaded ? remoteProducts : products
-    return source.filter((p) => p.isActive !== false)
-  }, [products, remoteProducts, remoteLoaded, hasProductFilter])
+    // Si el usuario quiere ver todos los productos, ignora el filtro
+    if (showAllProducts) {
+      const source = remoteLoaded ? remoteProducts : products;
+      return source.filter((p) => p.isActive !== false);
+    }
+    if (!hasProductFilter) return [];
+    const source = remoteLoaded ? remoteProducts : products;
+    return source.filter((p) => p.isActive !== false);
+  }, [products, remoteProducts, remoteLoaded, hasProductFilter, showAllProducts]);
 
   useEffect(() => {
-    let ignore = false
-
+    let ignore = false;
     const fetchRemoteProducts = async () => {
-      if (!selectedCompany) return
-      if (!hasProductFilter) {
-        setRemoteLoaded(false)
-        setRemoteProducts([])
-        return
+      if (!selectedCompany) return;
+      // Si el usuario quiere ver todos los productos, consulta todos
+      const fetchAll = showAllProducts;
+      if (!hasProductFilter && !fetchAll) {
+        setRemoteLoaded(false);
+        setRemoteProducts([]);
+        return;
       }
-      setRemoteLoaded(false)
-      setRemoteProducts([])
-      setIsLoadingProducts(true)
+      setRemoteLoaded(false);
+      setRemoteProducts([]);
+      setIsLoadingProducts(true);
+      const cacheKey = fetchAll ? `${selectedCompany}|ALL` : `${selectedCompany}|${lineFilter || "all"}`;
+      if (productsCache[cacheKey]) {
+        setRemoteProducts(productsCache[cacheKey]);
+        setRemoteLoaded(true);
+        setIsLoadingProducts(false);
+        return;
+      }
       try {
-        const token = await getAccessToken()
-        const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? ""
-        let page = 0
-        let totalPages = 1
-        const collected: Product[] = []
-
+        const token = await getAccessToken();
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+        let page = 0;
+        let totalPages = 1;
+        const collected: Product[] = [];
         while (page < totalPages) {
-          const q = searchTerm.trim()
-          const url = `${API_BASE}/catalogo-productos?codigoEmpresa=${encodeURIComponent(selectedCompany)}${
-            q ? `&q=${encodeURIComponent(q)}` : ""
-          }&page=${page}&size=100`
+          const q = searchTerm.trim();
+          let url = `${API_BASE}/catalogo-productos?codigoEmpresa=${encodeURIComponent(selectedCompany)}`;
+          if (!fetchAll && lineFilter) url += `&linea=${encodeURIComponent(lineFilter)}`;
+          if (q) url += `&q=${encodeURIComponent(q)}`;
+          url += `&page=${page}&size=100`;
           const res = await fetch(url, {
             headers: {
               Authorization: `Bearer ${token}`,
             },
-          })
-
-          if (!res.ok) break
-
-          const data = await res.json()
-          const content = (data?.content ?? []) as Product[]
-          collected.push(...content)
-          totalPages = data?.totalPages ?? 1
-          page += 1
+          });
+          if (!res.ok) break;
+          const data = await res.json();
+          const content = (data?.content ?? []) as Product[];
+          collected.push(...content);
+          totalPages = data?.totalPages ?? 1;
+          page += 1;
         }
-
         const withFiltroVenta = collected.filter(
           (p) => (p.isActive !== false) && (p.filtroVenta || p.codigoFiltroVenta),
-        )
-
+        );
         if (!ignore) {
-          setRemoteProducts(withFiltroVenta)
-          setRemoteLoaded(true)
+          setRemoteProducts(withFiltroVenta);
+          setRemoteLoaded(true);
+          setProductsCache(prev => ({ ...prev, [cacheKey]: withFiltroVenta }));
         }
       } catch (error) {
-        console.error("Error cargando productos en línea", error)
+        console.error("Error cargando productos en línea", error);
         if (!ignore) {
-          setRemoteProducts([])
-          setRemoteLoaded(false)
+          setRemoteProducts([]);
+          setRemoteLoaded(false);
         }
       } finally {
-        if (!ignore) setIsLoadingProducts(false)
+        if (!ignore) setIsLoadingProducts(false);
+      }
+    };
+    fetchRemoteProducts();
+    return () => { ignore = true; };
+  }, [selectedCompany, hasProductFilter, searchTerm, lineFilter, productsCache, showAllProducts]);
+
+  // Carga catálogos generales (línea) igual que en ofertas
+  useEffect(() => {
+    let ignore = false
+    const fetchCatalogs = async () => {
+      if (!selectedCompany) return
+      try {
+        const token = await getAccessToken()
+        const base = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "")
+        const headers: HeadersInit = { Authorization: `Bearer ${token}` }
+
+        const lineRes = await fetch(`${base}/catalogos-generales/${selectedCompany}/filtro_venta`, { headers })
+
+        if (!ignore && lineRes.ok) {
+          const lineJson = await lineRes.json().catch(() => [])
+          if (Array.isArray(lineJson)) setCatalogLines(lineJson as any)
+        }
+      } catch (e) {
+        console.warn("No se pudieron cargar catálogos de línea", e)
       }
     }
 
-    fetchRemoteProducts()
-
+    fetchCatalogs()
     return () => {
       ignore = true
     }
-  }, [selectedCompany, hasProductFilter, searchTerm])
+  }, [selectedCompany])
 
   useEffect(() => {
     let ignore = false
-    const fetchLists = async () => {
+    const load = async () => {
       if (!canRead || !selectedCompany) return
       setIsSyncingLists(true)
       try {
-        await syncPriceLists(selectedCompany)
+        const lists = await loadPriceListsOnline(selectedCompany)
+        if (!ignore) {
+          console.log("[Precio] listas cargadas (raw)", lists)
+          console.log("[Precio] listas UUID/codigo", lists.map((l: PriceList) => ({ name: l.name, serverId: l.serverId, code: l.code })))
+          console.log("[Precio] productos por lista", lists.map((l: PriceList) => ({ name: l.name, productos: Object.keys(l.products || {}).length })))
+        }
       } catch (error) {
-        console.error("Error sincronizando listas de precios", error)
+        console.error("Error cargando listas de precios", error)
       } finally {
         if (!ignore) setIsSyncingLists(false)
       }
     }
-
-    fetchLists()
+    load()
     return () => {
       ignore = true
     }
-  }, [canRead, selectedCompany, syncPriceLists])
-
-  const providerOptions = useMemo(() => {
-    const set = new Set<string>()
-    products.forEach((p) => {
-      if (p.isActive === false) return
-      const prov = productProvider(p)
-      if (prov) set.add(prov)
-    })
-    return Array.from(set).sort()
-  }, [products])
+  }, [canRead, selectedCompany, loadPriceListsOnline])
 
   const lineOptions = useMemo(() => {
-    const set = new Set<string>()
+    if (catalogLines.length) {
+      const map = new Map<string, { id: string; label: string }>()
+      catalogLines.forEach((c) => {
+        const id = normalizeStr(c.codigo || c.descripcion)
+        const label = (c.descripcion || c.codigo || "").trim()
+        if (!id || !label) return
+        if (!map.has(id)) map.set(id, { id, label })
+      })
+      return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
+    }
+
+    const map = new Map<string, { id: string; label: string }>()
     products.forEach((p) => {
       if (p.isActive === false) return
-      const line = productLine(p)
-      if (line) set.add(line)
+      const id = productLine(p)
+      const label = productLineLabel(p)
+      if (!id || !label) return
+      if (!map.has(id)) map.set(id, { id, label })
     })
-    return Array.from(set).sort()
-  }, [products])
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
+  }, [catalogLines, products])
+
+  const filteredLineOptions = useMemo(() => {
+    const term = lineSearch.trim().toLowerCase()
+    if (!term) return lineOptions
+    return lineOptions.filter(
+      (line) => line.label.toLowerCase().includes(term) || line.id.toLowerCase().includes(term),
+    )
+  }, [lineOptions, lineSearch])
 
   const companyOptions = useMemo(
     () => [
@@ -184,57 +256,50 @@ export default function PricesPage() {
     [],
   )
 
-  const filteredProducts = useMemo(
-    () =>
-      activeProducts
-        .filter((p) => {
-          const matchesSearch = searchTerm
-            ? `${productName(p)} ${productKey(p) || ""}`.toLowerCase().includes(searchTerm.toLowerCase())
-            : true
-          const matchesProvider = providerFilter ? productProvider(p) === providerFilter : true
-          const matchesLine = lineFilter ? productLine(p) === lineFilter : true
-          return matchesSearch && matchesProvider && matchesLine
-        })
-        .sort((a, b) => {
-          const provA = (productProvider(a) || "").toLowerCase()
-          const provB = (productProvider(b) || "").toLowerCase()
-          if (provA !== provB) return provA.localeCompare(provB)
-
-          const lineA = (productLine(a) || "").toLowerCase()
-          const lineB = (productLine(b) || "").toLowerCase()
-          if (lineA !== lineB) return lineA.localeCompare(lineB)
-
-          return productName(a).localeCompare(productName(b))
-        }),
-    [activeProducts, searchTerm, providerFilter, lineFilter],
-  )
+  const filteredProducts = useMemo(() => {
+    let products = activeProducts;
+    if (!showAllProducts) {
+      products = lineFilter ? products.filter(p => productLine(p) === lineFilter) : products;
+    }
+    if (searchTerm.trim()) {
+      const term = searchTerm.trim().toLowerCase();
+      products = products.filter(p => `${productName(p)} ${productKey(p) || ""}`.toLowerCase().includes(term));
+    }
+    return products.sort((a, b) => productName(a).localeCompare(productName(b)));
+  }, [activeProducts, searchTerm, lineFilter, showAllProducts]);
 
   const groupedProducts = useMemo(() => {
-    const providerMap = new Map<string, Map<string, Product[]>>()
+    const providerMap = new Map<string, { label: string; lines: Map<string, { label: string; products: Product[] }> }>()
 
     filteredProducts.forEach((p) => {
-      const provider = productProvider(p) || "Sin proveedor"
-      const line = productLine(p) || "Sin línea"
-      if (!providerMap.has(provider)) providerMap.set(provider, new Map())
-      const lineMap = providerMap.get(provider)!
-      if (!lineMap.has(line)) lineMap.set(line, [])
-      lineMap.get(line)!.push(p)
+      const providerId = productProvider(p) || "Sin proveedor"
+      const providerLabel = productProviderLabel(p) || providerId
+      const lineId = productLine(p) || "Sin línea"
+      const lineLabel = productLineLabel(p) || lineId
+
+      if (!providerMap.has(providerId)) providerMap.set(providerId, { label: providerLabel, lines: new Map() })
+      const provEntry = providerMap.get(providerId)!
+
+      if (!provEntry.lines.has(lineId)) provEntry.lines.set(lineId, { label: lineLabel, products: [] })
+      provEntry.lines.get(lineId)!.products.push(p)
     })
 
     return Array.from(providerMap.entries())
-      .map(([provider, lineMap]) => ({
-        provider,
-        lines: Array.from(lineMap.entries())
-          .map(([line, products]) => ({ line, products }))
+      .map(([providerId, provEntry]) => ({
+        provider: provEntry.label,
+        lines: Array.from(provEntry.lines.entries())
+          .map(([lineId, lineEntry]) => ({ line: lineEntry.label, products: lineEntry.products }))
           .sort((a, b) => a.line.localeCompare(b.line)),
       }))
       .sort((a, b) => a.provider.localeCompare(b.provider))
   }, [filteredProducts, hiddenLines])
 
-  const companyPriceLists = useMemo(
-    () => priceLists.filter((pl) => (pl.companyId || "general") === selectedCompany),
-    [priceLists, selectedCompany],
-  )
+  const companyPriceLists = useMemo(() => {
+    const sel = (selectedCompany || "general").toUpperCase()
+    return priceLists
+      .filter((pl) => ((pl.companyId || "general").toUpperCase() === sel))
+      .sort((a, b) => (a.tier ?? 0) - (b.tier ?? 0))
+  }, [priceLists, selectedCompany])
 
   useEffect(() => {
     const ids = companyOptions.map((c) => c.id)
@@ -243,20 +308,22 @@ export default function PricesPage() {
     }
   }, [companyOptions, selectedCompany])
 
-  const baseList = useMemo(
-    () => companyPriceLists.find((pl) => (pl.tier ?? 0) === 0) || null,
-    [companyPriceLists],
-  )
+  const baseList = useMemo(() => {
+    // tier === 0 o code === "default"
+    const found = companyPriceLists.find((pl) => (pl.tier ?? 0) === 0 || (pl.code || "").toLowerCase() === "default")
+    return found || null
+  }, [companyPriceLists])
 
-  const additionalLists = useMemo(
-    () => companyPriceLists.filter((pl) => (pl.tier ?? 0) !== 0).sort((a, b) => (a.tier ?? 999) - (b.tier ?? 999)),
-    [companyPriceLists],
-  )
+  const additionalLists = useMemo(() => {
+    return companyPriceLists
+      .filter((pl) => (pl.tier ?? 0) !== 0 && (pl.code || "").toLowerCase() !== "default")
+      .sort((a, b) => (a.tier ?? 999) - (b.tier ?? 999))
+  }, [companyPriceLists])
 
   const visibleLists = useMemo(() => {
-    if (baseList) return [baseList, ...additionalLists]
-    return additionalLists
-  }, [baseList, additionalLists])
+    const list = baseList ? [baseList, ...additionalLists] : additionalLists
+    return list.length ? list : companyPriceLists // fallback: muestra todo si no se detecta base/tiers
+  }, [baseList, additionalLists, companyPriceLists])
 
   const nextListLabel = useMemo(() => {
     if (!companyPriceLists.length) return "Default"
@@ -406,23 +473,35 @@ export default function PricesPage() {
     setIsGeneratingStructure(true)
     const tiers = [0, 1, 2, 3]
     const names = ["Default", "Lista de precios 1", "Lista de precios 2", "Lista de precios 3"]
-    const baseProducts = baseList?.products ?? {}
+    const defaultProductPrices = products.reduce<Record<string, number>>((acc, product) => {
+      if (product.isActive === false) return acc
+      const key = productKey(product)
+      if (!key) return acc
+      acc[key] = productBasePrice(product)
+      return acc
+    }, {})
 
-    for (let i = 0; i < tiers.length; i++) {
-      const tier = tiers[i]
-      const exists = companyPriceLists.some((pl) => (pl.tier ?? 0) === tier)
-      if (exists) continue
+    try {
+      for (let i = 0; i < tiers.length; i++) {
+        const tier = tiers[i]
+        const exists = companyPriceLists.some((pl) => (pl.tier ?? 0) === tier)
+        if (exists) continue
 
-      await addPriceList({
-        name: `${selectedCompany} ${names[i]}`,
-        companyId: selectedCompany,
-        tier,
-        products: tier === 0 ? baseProducts : {},
-        isActive: true,
-      })
+        const listCode = getPriceListCode(tier)
+        const productsPayload = tier === 0 ? baseList?.products ?? defaultProductPrices : {}
+
+        await addPriceList({
+          name: `${selectedCompany} ${names[i]}`,
+          companyId: selectedCompany,
+          tier,
+          products: productsPayload,
+          isActive: true,
+          listCode,
+        })
+      }
+    } finally {
+      setIsGeneratingStructure(false)
     }
-
-    setIsGeneratingStructure(false)
   }
 
   const handleQuickCreate = async () => {
@@ -437,12 +516,13 @@ export default function PricesPage() {
       tier: nextTier,
       products: {},
       isActive: true,
+      listCode: getPriceListCode(nextTier),
     })
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <main className="max-w-7xl mx-auto p-2 pt-3 sm:px-2 lg:px-4 overflow-visible">
         <div className="px-4 py-6 sm:px-0 space-y-6">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
@@ -481,8 +561,9 @@ export default function PricesPage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-                  <div className="md:col-span-2">
+                {/* Product filter block (single instance) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 items-end">
+                  <div className="md:col-span-1">
                     <label className="text-sm text-gray-700">Buscar por código o nombre</label>
                     <Input
                       placeholder="Buscar..."
@@ -491,35 +572,48 @@ export default function PricesPage() {
                       className="mt-1"
                     />
                   </div>
-                  <div>
-                    <label className="text-sm text-gray-700">Proveedor</label>
-                    <select
-                      value={providerFilter}
-                      onChange={(e) => setProviderFilter(e.target.value)}
-                      className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                    >
-                      <option value="">Todos</option>
-                      {providerOptions.map((prov) => (
-                        <option key={prov} value={prov}>
-                          {prov}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
+                  <div className="w-full">
                     <label className="text-sm text-gray-700">Línea</label>
-                    <select
-                      value={lineFilter}
-                      onChange={(e) => setLineFilter(e.target.value)}
-                      className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                    <Select
+                      open={openLineSelect}
+                      onOpenChange={setOpenLineSelect}
+                      value={lineFilter || "all"}
+                      onValueChange={(val) => {
+                        setLineFilter(val === "all" ? "" : val)
+                        setOpenLineSelect(false)
+                        setLineSearch("");
+                      }}
                     >
-                      <option value="">Todas</option>
-                      {lineOptions.map((line) => (
-                        <option key={line} value={line}>
-                          {line}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger className="mt-1 w-full">
+                        <SelectValue placeholder="Selecciona o busca línea..." />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-64 overflow-y-auto z-[9999]" position="popper">
+                        <div className="px-2 py-1">
+                          <Input
+                            autoFocus
+                            placeholder="Buscar o seleccionar línea..."
+                            value={lineSearch}
+                            onChange={(e) => setLineSearch(e.target.value)}
+                            className="mb-2 w-full"
+                            onClick={e => e.stopPropagation()}
+                          />
+                        </div>
+                        <SelectItem value="all">Todas</SelectItem>
+                        {filteredLineOptions.map((line) => (
+                          <SelectItem key={line.id} value={line.id}>
+                            {line.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex justify-end w-full">
+                    <Button
+                      variant={showAllProducts ? "secondary" : "default"}
+                      onClick={() => setShowAllProducts((prev) => !prev)}
+                    >
+                      {showAllProducts ? "Ocultar todos los productos" : "Mostrar todos los productos"}
+                    </Button>
                   </div>
                 </div>
 
@@ -671,10 +765,10 @@ export default function PricesPage() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-lg">Edición rápida de precios</CardTitle>
-              <CardDescription>Filtra por proveedor/línea y edita listas base y 1/2/3 en línea.</CardDescription>
+              <CardDescription>Filtra por línea y edita listas base y 1/2/3 en línea.</CardDescription>
             </CardHeader>
             <CardContent className="overflow-auto space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 <div>
                   <label className="text-sm text-gray-700">Buscar producto rápido</label>
                   <Input
@@ -684,38 +778,49 @@ export default function PricesPage() {
                     className="mt-1"
                   />
                 </div>
-                <div>
-                  <label className="text-sm text-gray-700">Proveedor</label>
-                  <select
-                    value={providerFilter}
-                    onChange={(e) => setProviderFilter(e.target.value)}
-                    className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  >
-                    <option value="">Todos</option>
-                    {providerOptions.map((prov) => (
-                      <option key={prov} value={prov}>
-                        {prov}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
+                <div className="w-full">
                   <label className="text-sm text-gray-700">Línea</label>
-                  <select
-                    value={lineFilter}
-                    onChange={(e) => setLineFilter(e.target.value)}
-                    className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  <Select
+                    open={openLineSelect}
+                    onOpenChange={setOpenLineSelect}
+                    value={lineFilter || "all"}
+                    onValueChange={(val) => {
+                      setLineFilter(val === "all" ? "" : val)
+                      setOpenLineSelect(false)
+                      setLineSearch("");
+                    }}
                   >
-                    <option value="">Todas</option>
-                    {lineOptions.map((line) => (
-                      <option key={line} value={line}>
-                        {line}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger className="mt-1 w-full">
+                      <SelectValue placeholder="Selecciona o busca línea..." />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-64 overflow-y-auto z-[9999]" position="popper">
+                      <div className="px-2 py-1">
+                        <Input
+                          autoFocus
+                          placeholder="Buscar o seleccionar línea..."
+                          value={lineSearch}
+                          onChange={(e) => setLineSearch(e.target.value)}
+                          className="mb-2 w-full"
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </div>
+                      <SelectItem value="all">Todas</SelectItem>
+                      {filteredLineOptions.map((line) => (
+                        <SelectItem key={line.id} value={line.id}>
+                          {line.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-                <div>
-                </div>
+                  <div className="flex justify-end w-full">
+                    <Button
+                      variant={showAllProducts ? "secondary" : "default"}
+                      onClick={() => setShowAllProducts((prev) => !prev)}
+                    >
+                      {showAllProducts ? "Ocultar todos los productos" : "Mostrar todos los productos"}
+                    </Button>
+                  </div>
               </div>
 
               <div className="min-w-full overflow-x-auto">

@@ -56,6 +56,7 @@ type ClienteRow = {
   telefono?: string;
   correo?: string;
   zona?: string;
+  clasificacionPrecios?: number | string | null;
 };
 
 export default function CustomerSelectionModal({

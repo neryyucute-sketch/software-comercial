@@ -15,6 +15,7 @@ import { useAuth } from "@/contexts/AuthContext"
 import { /*syncOfertasPreventa,*/ } from "@/services/ofertas"
 import { materializeOffer } from "@/services/offers.materializer"
 import { getTokens } from "@/services/auth"
+import { mapBackendToOfferDef } from "@/services/offers.repo"
 
 interface SyncStatus {
   isOnline: boolean
@@ -118,41 +119,13 @@ export function SyncManager() {
           }
         };
 
-        const detalle = parseDetalle(item.ofertaDetalle) || parseDetalle(item.detalle) || {};
-        // Amplios fallbacks para campos comunes en distintos backends
-        const description = detalle.description || detalle.descripcion || item.descripcion || "";
-        const dates = detalle.dates || {
-          validFrom: detalle.validFrom || detalle.fechaDesde || item.fechaDesde || null,
-          validTo: detalle.validTo || detalle.fechaHasta || item.fechaHasta || null,
-        };
-        const scope = detalle.scope || detalle.ambito || item.scope || {};
-
+        const detalle = parseDetalle(item.ofertaDetalle) || parseDetalle(item.detalle) || null;
+        const normalized = mapBackendToOfferDef({ ...item, ofertaDetalle: detalle ?? item.ofertaDetalle });
         return {
-          id: item.uuidOferta || detalle.id || `${item.id || item.uuid || Math.random()}`,
-          serverId: item.uuidOferta || item.uuid || item.id,
-          codigoEmpresa: item.codigoEmpresa || detalle.codigoEmpresa || detalle.empresa || item.empresa,
-          type: detalle.type || detalle.tipo || item.tipoOferta || item.type || "discount",
-          name: detalle.name || detalle.nombre || item.nombre || item.name || "",
-          description,
-          status: detalle.status || detalle.estado || item.estado || "draft",
-          dates: {
-            validFrom: dates.validFrom,
-            validTo: dates.validTo,
-          },
-          scope,
-          products: detalle.products || detalle.productos || item.products || item.productos || [],
-          familias: detalle.familias || detalle.family || item.familias || [],
-          subfamilias: detalle.subfamilias || item.subfamilias || [],
-          proveedores: detalle.proveedores || detalle.proveedoresIds || item.proveedores || [],
-          discount: detalle.discount || detalle.descuento || item.discount,
-          bonus: detalle.bonus || item.bonus,
-          pack: detalle.pack || item.pack,
-          version: item.version || detalle.version || 1,
-          updatedAt: item.fechaModificacion || detalle.updatedAt || new Date().toISOString(),
+          ...normalized,
           dirty: false,
-          deleted: item.eliminado || detalle.eliminado || false,
           // Guardar el payload crudo para inspección/debug (ya con detalle parseado si existía)
-          raw: { ...item, ofertaDetalle: detalle || item.ofertaDetalle },
+          raw: { ...item, ofertaDetalle: detalle ?? item.ofertaDetalle },
         } as any;
       })
 

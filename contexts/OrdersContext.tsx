@@ -29,9 +29,18 @@ function uuid(): string {
 
 async function registerBGSync() {
   try {
-    if ("serviceWorker" in navigator && "SyncManager" in window) {
-      const reg = await navigator.serviceWorker.ready;
-      (await (reg as any).sync.register("sync-pedidos"));
+    if (!("serviceWorker" in navigator)) return;
+
+    // Espera control del SW sólo un tiempo para no colgar la promesa cuando no está registrado.
+    const ready = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+    ]);
+
+    if (!ready) return; // sin SW activo, no bloquear
+
+    if ("SyncManager" in window) {
+      await (ready as any).sync.register("sync-pedidos");
     } else {
       // Fallback: pedir al SW que sincronice por mensaje
       navigator.serviceWorker?.controller?.postMessage?.("SYNC_PEDIDOS_NOW");
@@ -48,9 +57,21 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
 
   const loadOrdersFromDB = useCallback(async () => {
     const data = await getCachedOrders();
+    const normalized = data.map((order) => {
+      if (!Array.isArray(order.items) || order.items.length === 0) return order;
+      const sortedItems = [...order.items].sort((a, b) => {
+        const aNum = a?.lineNumber ?? Number.POSITIVE_INFINITY;
+        const bNum = b?.lineNumber ?? Number.POSITIVE_INFINITY;
+        if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+        if (Number.isFinite(aNum)) return -1;
+        if (Number.isFinite(bNum)) return 1;
+        return 0;
+      });
+      return { ...order, items: sortedItems } as Order;
+    });
     // Mostrar primero los más recientes
-    data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    setOrders(data);
+    normalized.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    setOrders(normalized);
   }, []);
 
   useEffect(() => {

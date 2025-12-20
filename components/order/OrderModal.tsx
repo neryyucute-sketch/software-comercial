@@ -24,7 +24,9 @@ export default function OrderModal({
         "
       >
         
-         <DialogTitle>Nuevo Pedido</DialogTitle>
+         <DialogTitle>
+           <span className="block text-2xl font-bold text-blue-700 text-center w-full">Nuevo Pedido</span>
+         </DialogTitle>
 
         {/* Contenedor para que el contenido interno ocupe toda la altura disponible */}
         <div className="flex h-full max-h-[inherit] flex-col">

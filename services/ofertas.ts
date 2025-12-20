@@ -3,6 +3,7 @@ import { syncData } from "./sync";
 import type { AuthUser } from "../lib/types";
 import type { OfferDef } from "../lib/types.offers";
 import { materializeOffer } from "./offers.materializer";
+import { mapBackendToOfferDef } from "./offers.repo";
 
 export async function syncOfertasPreventa(user: AuthUser | null): Promise<void> {
   const ven = user?.usuarioConfiguracion.find(
@@ -19,33 +20,17 @@ export async function syncOfertasPreventa(user: AuthUser | null): Promise<void> 
   console.debug("[syncOfertasPreventa] raw result:", result && Array.isArray(result) ? `array(${result.length})` : result);
 
   if (result && Array.isArray(result)) {
+    const now = new Date().toISOString();
     const ofertas: OfferDef[] = result.map((item: any) => {
-      const detalle = item.detalle || item;
-      
+      const mapped = mapBackendToOfferDef(item);
+      const ref = mapped.referenceCode ?? mapped.codigoOferta;
       return {
-        id: item.uuidOferta || detalle.id,
-        serverId: item.uuidOferta,
-        codigoEmpresa: item.codigoEmpresa || detalle.codigoEmpresa,
-        type: detalle.type || item.tipoOferta,
-        name: detalle.name || "",
-        description: detalle.description || "",
-        status: detalle.status || item.estado || "draft",
-        dates: {
-          validFrom: detalle.dates?.validFrom || item.fechaDesde,
-          validTo: detalle.dates?.validTo || item.fechaHasta,
-        },
-        scope: detalle.scope || {},
-        products: detalle.products || [],
-        familias: detalle.familias || [],
-        subfamilias: detalle.subfamilias || [],
-        proveedores: detalle.proveedores || [],
-        discount: detalle.discount,
-        bonus: detalle.bonus,
-        pack: detalle.pack,
-        version: item.version || 1,
-        updatedAt: item.fechaModificacion || new Date().toISOString(),
-        dirty: false,
-        deleted: item.eliminado || false,
+        ...mapped,
+        referenceCode: ref ?? undefined,
+        codigoOferta: ref ?? undefined,
+        codigoEmpresa: mapped.codigoEmpresa || params.codigoEmpresa,
+        createdAt: mapped.createdAt || mapped.updatedAt || now,
+        updatedAt: mapped.updatedAt || mapped.createdAt || now,
       };
     });
 

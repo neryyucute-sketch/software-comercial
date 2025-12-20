@@ -32,6 +32,7 @@ interface OfferEditorDialogProps {
   draft: OfferDef | null;
   onClose: () => void;
   onSave: (off: OfferDef) => Promise<void>;
+  existingOffers: OfferDef[];
 
   catalogs: {
     proveedores: CatalogoGeneral[];
@@ -52,6 +53,7 @@ export function OfferEditorDialog({
   draft: propDraft,      // 👈 renombramos el prop
   onClose,
   onSave,
+  existingOffers,
   catalogs,
   catalogsLoading,
   catalogsError,
@@ -61,6 +63,46 @@ export function OfferEditorDialog({
 
   const handleSave = async () => {
     if (!draft) return;
+
+    const normalizedCode = (draft.referenceCode || "").trim().toUpperCase();
+    const hasCode = Boolean(normalizedCode);
+    const isPackOffer = draft.type === "combo" || draft.type === "kit";
+
+    if (isPackOffer && !hasCode) {
+      toast({
+        title: "Ingresa un código",
+        description: "Los combos y kits necesitan un código único para agruparse en los pedidos.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (hasCode) {
+      const offersArr = Array.isArray(existingOffers) ? existingOffers : [];
+      const duplicate = offersArr.some((offer) => {
+        if (!offer.referenceCode) return false;
+        const offerCode = offer.referenceCode.trim().toUpperCase();
+        if (!offerCode) return false;
+        const sameId = (offer.serverId || offer.id) === (draft.serverId || draft.id);
+        if (sameId) return false;
+        return offerCode === normalizedCode;
+      });
+
+      if (duplicate) {
+        toast({
+          title: "Código ya utilizado",
+          description: "Selecciona otro código. Cada oferta necesita un identificador único.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      draft.referenceCode = normalizedCode;
+      draft.codigoOferta = normalizedCode;
+    } else {
+      draft.referenceCode = undefined;
+      draft.codigoOferta = undefined;
+    }
 
     if (draft.type === "discount") {
       const tiers = draft.discount?.tiers ?? [];
@@ -100,6 +142,77 @@ export function OfferEditorDialog({
       } as any;
     }
 
+    if (draft.type === "combo" || draft.type === "kit") {
+      const pack = draft.pack;
+      const precio = Number(pack?.precioFijo ?? 0);
+      const total = Number(pack?.cantidadTotalProductos ?? 0);
+      const itemsFijos = pack?.itemsFijos ?? [];
+      const itemsVariables = pack?.itemsVariablesPermitidos ?? [];
+
+      const invalidFijos = itemsFijos.some(
+        (item) => !item.productoId || !item.unidades || item.unidades <= 0
+      );
+      const unidadesFijas = itemsFijos.reduce(
+        (acc, item) => acc + Number(item.unidades ?? 0),
+        0
+      );
+
+      if (!pack || !itemsFijos.length || invalidFijos) {
+        toast({
+          title: "Configura los fijos",
+          description: "Los combos y kits necesitan productos fijos con unidades mayores a cero.",
+          variant: "default",
+        });
+        return;
+      }
+
+      if (!precio || precio <= 0) {
+        toast({
+          title: "Define el precio del paquete",
+          description: "Ingresa un precio fijo mayor a cero.",
+          variant: "default",
+        });
+        return;
+      }
+
+      if (!total || total <= 0) {
+        toast({
+          title: "Cantidad total requerida",
+          description: "Indica cuántos productos debe contener el combo/kit.",
+          variant: "default",
+        });
+        return;
+      }
+
+      if (draft.type === "kit") {
+        if (unidadesFijas !== total) {
+          toast({
+            title: "Kits cerrados",
+            description: "La suma de unidades fijas debe ser igual al total del kit.",
+            variant: "default",
+          });
+          return;
+        }
+      } else {
+        if (unidadesFijas > total) {
+          toast({
+            title: "Cupos excedidos",
+            description: "La suma de fijos supera la cantidad total de productos.",
+            variant: "default",
+          });
+          return;
+        }
+        if (unidadesFijas < total && itemsVariables.length === 0) {
+          toast({
+            title: "Faltan variables",
+            description: "Agrega productos variables para que el usuario complete los cupos.",
+            variant: "default",
+          });
+          return;
+        }
+      }
+    }
+
     await onSave(draft);
   };
 
@@ -128,7 +241,16 @@ export function OfferEditorDialog({
       <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="text-lg font-semibold text-slate-900">
-            {draft.id ? "Editar oferta de descuento" : "Nueva oferta"}
+            {(() => {
+              const type = draft.type;
+              let label = "Oferta";
+              if (type === "discount") label = "Descuento";
+              else if (type === "bonus") label = "Bonificación";
+              else if (type === "combo") label = "Combo";
+              else if (type === "kit") label = "Kit";
+              else if (type === "pricelist") label = "Lista negociada";
+              return draft.id ? `${label}` : `Nueva ${label}`;
+            })()}
           </DialogTitle>
         </DialogHeader>
 

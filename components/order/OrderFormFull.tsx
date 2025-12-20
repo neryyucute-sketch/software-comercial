@@ -1,26 +1,38 @@
 // components/order/OrderFormFull.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useOrders } from "@/contexts/OrdersContext";
 import type { Order, OrderItem } from "@/lib/types";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePreventa } from "@/contexts/preventa-context";
 import { getApplicableOffers, ApplicableOffer, type BonusApplication } from "@/lib/offers-engine";
 import type { OfferDef, DiscountTier } from "@/lib/types.offers";
 import type { Product, Cliente } from "@/lib/types";
+import { extractCustomerPriceCode } from "@/lib/price-list-utils";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { MapPin, Camera, Gift, Package, User, Search } from "lucide-react";
+import { MapPin, Camera, Gift, Package, User, Search, ChevronUp, ChevronDown } from "lucide-react";
 import CustomerSelectionModal from "./modals/CustomerSelectionModal";
 import ProductSelectionModal from "./modals/ProductSelectionModal";
-import ComboSelectionModal from "./modals/ComboSelectionModal";
+import ComboSelectionModal, {
+  OfferPackConfigurator,
+  type OfferPackRow,
+  matchesOfferScope,
+  isOfferInDateRange,
+  resolvePackType,
+  isOfferActive,
+} from "./modals/ComboSelectionModal";
 import OrderPhotos from "./OrderPhotos";
 import { db } from "@/lib/db";
 import { useToast } from "@/hooks/use-toast";
+import { groupOrderComboItems, resolveComboGroupQuantity, resolveComboGroupUnitPrice, prepareOrderItemsForPersistence, type OrderComboGroup } from "@/lib/order-helpers";
+import { pickReferenceCode } from "@/lib/utils";
 
 function extractDiscountConfig(offer: OfferDef) {
   const discountConfig = offer.discount || (offer as any).discountConfig;
@@ -292,6 +304,8 @@ function uuidSimple(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+const round2 = (value: number) => Math.round((Number(value) || 0) * 100) / 100;
+
 function nextTempOrderNumber(vendorCode: string, serie?: string, companyCode?: string) {
   const key = `pedido_seq_${companyCode || 'cmp'}_${vendorCode || 'V'}_${serie || 'def'}`;
   const current = Number(localStorage.getItem(key) || '0');
@@ -310,16 +324,32 @@ function peekTempOrderNumber(vendorCode: string, serie?: string, companyCode?: s
 }
 
 const asId = (v?: string | number | null) => (v ?? '').toString().trim().toLowerCase().replace(/\s+/g, '_');
+const normalizeCompanyId = (value?: string | null) => (value ?? 'general').toString().trim().toLowerCase();
 
 type ClienteLite = {
   codigoCliente: string;
   nombreCliente: string;
   nit?: string;
   tipoCliente?: string;
+  clasificacionPrecios?: number | string | null;
+  listaPrecio?: string | null;
+  lista_precio?: string | null;
+  listaPrecioCodigo?: string | null;
+  priceListCode?: string | null;
+};
+
+type OrderPayload = Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> & {
+  customerId?: string;
 };
 
 export default function OrderFormFull({ onClose, draft, open }: { onClose: () => void; draft?: any; open: boolean }) {
-  const { addOrder } = useOrders();
+      // Estado para mostrar/ocultar paneles en móvil
+      const [showLeftPanel, setShowLeftPanel] = useState(true);
+      const [showProductsPanel, setShowProductsPanel] = useState(true);
+    // Considera draft como "borrador" si existe la prop draft
+    const isDraft = !!draft;
+  const { addOrder, syncOrders } = useOrders();
+  const { priceLists, syncPriceLists } = usePreventa();
 
   const [customer, setCustomer] = useState<ClienteLite | null>(null);
   const [items, setItems] = useState<OrderItem[]>([]);
@@ -337,6 +367,12 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
   const [selectedAddressId, setSelectedAddressId] = useState<string>("");
   const [summaryOpen, setSummaryOpen] = useState<boolean>(true);
   const [pendingAppliedOfferIds, setPendingAppliedOfferIds] = useState<string[]>([]);
+  const [priceListLoading, setPriceListLoading] = useState(false);
+  const [priceListError, setPriceListError] = useState<string | null>(null);
+  const priceListSyncedCompanies = useRef<Set<string>>(new Set());
+  const priceListRequestRef = useRef<string | null>(null);
+  const priceListCompaniesRef = useRef<Set<string>>(new Set());
+  const priceListErroredCompanies = useRef<Set<string>>(new Set());
 
   const [photos, setPhotos] = useState<{ id: string; dataUrl: string; timestamp: number }[]>([]);
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -345,15 +381,49 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
   const [openCustomer, setOpenCustomer] = useState(false);
   const [openProducts, setOpenProducts] = useState(false);
   const [openCombos, setOpenCombos] = useState(false);
+  const [activePackOffer, setActivePackOffer] = useState<OfferPackRow | null>(null);
+
+  const comboItems = useMemo(() => items.filter((it) => it.comboId || it.kitId || it.comboCode), [items]);
+  const normalItems = useMemo(() => items.filter((it) => !(it.comboId || it.kitId || it.comboCode)), [items]);
+  const comboGroups = useMemo(() => groupOrderComboItems(comboItems), [comboItems]);
+  const [openComboDetails, setOpenComboDetails] = useState<Record<string, boolean>>({});
+  const toggleComboDetail = useCallback((key: string) => {
+    setOpenComboDetails((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  useEffect(() => {
+    setOpenComboDetails((prev) => {
+      const allowed = new Set(comboGroups.map((group) => group.key));
+      let changed = false;
+      const next: Record<string, boolean> = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        if (allowed.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [comboGroups]);
 
   // Ofertas
   const [allOffers, setAllOffers] = useState<OfferDef[]>([]);
   const [productosAll, setProductosAll] = useState<Product[]>([]);
+  const productMap = useMemo(() => {
+    const map = new Map<string, Product>();
+    productosAll.forEach((p) => {
+      if (p?.codigoProducto) {
+        map.set(String(p.codigoProducto), p);
+      }
+    });
+    return map;
+  }, [productosAll]);
   const [applicableOffers, setApplicableOffers] = useState<ApplicableOffer[]>([]);
   const [offersOpen, setOffersOpen] = useState(false);
   const [expandedOfferId, setExpandedOfferId] = useState<string | null>(null);
   const [appliedOffers, setAppliedOffers] = useState<ApplicableOffer[]>([]);
-  const [offersTab, setOffersTab] = useState<"discounts" | "bonuses">("discounts");
+  const [offersTab, setOffersTab] = useState<"discounts" | "bonuses" | "packs">("discounts");
   const [offersSearch, setOffersSearch] = useState("");
   const [offersStatusFilter, setOffersStatusFilter] = useState<"all" | "active" | "inactive" | "draft">("all");
   const [offersTypeFilter, setOffersTypeFilter] = useState<"all" | "discount" | "bonus">("all");
@@ -369,12 +439,16 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
   const [bonusSearch, setBonusSearch] = useState("");
   const [bonusProviderFilter, setBonusProviderFilter] = useState<string | null>(null);
   const [bonusLineFilter, setBonusLineFilter] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const { toast } = useToast();
   const bonusAlertKeyRef = useRef<string>("");
   const bonusDraftQuantities = pendingBonus?.draftQuantities || {};
   const totalBonusToAssign = pendingBonus?.applications.reduce((acc, a) => acc + a.bonusQty, 0) || 0;
   const assignedBonusQty = Object.values(bonusDraftQuantities).reduce((acc: number, v: any) => acc + Number(v || 0), 0);
+  const pendingBonusQty = Math.max(totalBonusToAssign - assignedBonusQty, 0);
+
+  const canUseDOM = typeof window !== "undefined" && typeof document !== "undefined";
 
   // Avisar cuando con las cantidades actuales se alcanza más bonificación que la aplicada
   useEffect(() => {
@@ -408,6 +482,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         if (bonusAlertKeyRef.current !== key) {
           bonusAlertKeyRef.current = key;
           toast({
+            duration: 1000,
             title: "Tienes más bonificación disponible",
             description: `La oferta ${app.offer.name} permite ${potential - appliedQty} unds extra. Reaplica para agregarlas.`,
           });
@@ -427,6 +502,12 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     setBonusLineFilter(null);
   }, [showBonusPicker]);
 
+  useEffect(() => {
+    const companies = new Set<string>();
+    priceLists.forEach((pl) => companies.add(normalizeCompanyId(pl.companyId)));
+    priceListCompaniesRef.current = companies;
+  }, [priceLists]);
+
   const updateBonusDraftQuantity = (pid: string | number, qtyRaw: number) => {
     setPendingBonus((prev) => {
       if (!prev) return prev;
@@ -441,8 +522,48 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
 
   const discountOffers = useMemo(() => applicableOffers.filter((o) => o.offer.type !== "bonus"), [applicableOffers]);
   const bonusOffers = useMemo(() => applicableOffers.filter((o) => o.offer.type === "bonus"), [applicableOffers]);
+  const packOffers = useMemo<OfferPackRow[]>(() => {
+    if (!customer) return [];
+    const today = new Date();
+    return (allOffers || [])
+      .filter((off) => {
+        const packType = resolvePackType(off.type);
+        return packType && !off.deleted && off.pack && isOfferActive(off.status);
+      })
+      .filter((off) => isOfferInDateRange(off, today))
+      .filter((off) => matchesOfferScope(off, customer, { skipCustomerCodes: true }))
+      .map((off) => {
+        const pack = off.pack!;
+        const packType = resolvePackType(off.type) ?? "combo";
+        const preview = [
+          ...(pack.itemsFijos ?? []).map((item) => ({
+            productoId: item.productoId,
+            descripcion: item.descripcion ?? item.productoId,
+            cantidad: item.unidades,
+            precioUnitario: 0,
+          })),
+          ...(pack.itemsVariablesPermitidos ?? []).map((item) => ({
+            productoId: item.productoId,
+            descripcion: `${item.descripcion ?? item.productoId} · variable`,
+            cantidad: 0,
+            precioUnitario: 0,
+          })),
+        ];
+        return {
+          idt: off.id,
+          descripcion: off.name || off.description || `Oferta ${off.id}`,
+          items: preview,
+          _type: packType,
+          source: "offer",
+          offer: off,
+          packConfig: pack,
+          price: pack.precioFijo,
+        } satisfies OfferPackRow;
+      });
+  }, [allOffers, customer]);
 
   const filteredOffersByTab = useMemo(() => {
+    if (offersTab === "packs") return [] as ApplicableOffer[];
     const term = offersSearch.trim().toLowerCase();
     const source = offersTab === "discounts" ? discountOffers : bonusOffers;
 
@@ -513,13 +634,24 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     }
   };
 
+  const removeComboGroup = useCallback((group: OrderComboGroup) => {
+    const idsToRemove = new Set(group.items.map((item) => item.id));
+    const filtered = items.filter((item) => !idsToRemove.has(item.id));
+    recalcItemsWithOffer(filtered);
+  }, [items, recalcItemsWithOffer]);
+
   const existingItems = useMemo(
     () => items.reduce<Record<string, number>>((acc, it) => {
+        if (it.comboId || it.kitId || it.comboCode || it.comboType === "combo" || it.comboType === "kit") {
+          return acc;
+        }
         acc[it.productoId] = (acc[it.productoId] || 0) + it.cantidad;
         return acc;
     }, {}),
     [items]
     );  
+
+  const selectedCount = useMemo(() => items.reduce((acc, it) => acc + (it.cantidad || 0), 0), [items]);
 
   useEffect(() => {
     const draft = {
@@ -566,6 +698,59 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     const entry = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "SERIE PEDIDO" || i.configuracion === "SERIE_PEDIDO");
     return (entry?.valor as string) || undefined;
   }, [user]);
+
+  const ensurePriceLists = useCallback(
+    async (targetCompany?: string | null) => {
+      const fallbackCompany = targetCompany || companyCode || "general";
+      if (!fallbackCompany) return;
+      const normalized = normalizeCompanyId(fallbackCompany);
+
+      if (priceListCompaniesRef.current.has(normalized)) {
+        priceListSyncedCompanies.current.add(normalized);
+        priceListErroredCompanies.current.delete(normalized);
+        setPriceListError(null);
+        return;
+      }
+
+      if (priceListSyncedCompanies.current.has(normalized)) return;
+      if (priceListErroredCompanies.current.has(normalized)) return;
+      if (priceListRequestRef.current === normalized) return;
+
+      try {
+        priceListRequestRef.current = normalized;
+        setPriceListLoading(true);
+        await syncPriceLists(fallbackCompany);
+        priceListSyncedCompanies.current.add(normalized);
+        priceListErroredCompanies.current.delete(normalized);
+        setPriceListError(null);
+      } catch (err: any) {
+        priceListErroredCompanies.current.add(normalized);
+        setPriceListError(err?.message || "No se pudieron cargar las listas de precio.");
+      } finally {
+        priceListRequestRef.current = null;
+        setPriceListLoading(false);
+      }
+    },
+    [companyCode, syncPriceLists]
+  );
+
+  useEffect(() => {
+    if (!companyCode) return;
+    const targetCompany =
+      (customer as any)?.codigoEmpresa || (customer as any)?.companyId || companyCode;
+    void ensurePriceLists(targetCompany);
+  }, [companyCode, customer, ensurePriceLists]);
+
+  const retryPriceLists = useCallback(() => {
+    const targetCompany =
+      (customer as any)?.codigoEmpresa || (customer as any)?.companyId || companyCode;
+    if (!targetCompany) return;
+    const normalized = normalizeCompanyId(targetCompany);
+    priceListSyncedCompanies.current.delete(normalized);
+    priceListErroredCompanies.current.delete(normalized);
+    void ensurePriceLists(targetCompany);
+  }, [companyCode, customer, ensurePriceLists]);
+
 
   // Cargar ofertas y productos locales para evaluar aplicabilidad
   useEffect(() => {
@@ -735,10 +920,29 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     if (!customer) return;
     (async () => {
       const c = await db.clientes.where("codigoCliente").equals(customer.codigoCliente).first();
-      if (c && c.canalVenta && c.canalVenta !== customer.tipoCliente) {
-        setCustomer((prev) => (prev ? { ...prev, tipoCliente: c.canalVenta as any } : prev));
-      }
       if (c) {
+        setCustomer((prev) => {
+          if (!prev) return prev;
+          let changed = false;
+          const next: ClienteLite = { ...prev };
+
+          if (c.canalVenta && c.canalVenta !== prev.tipoCliente) {
+            next.tipoCliente = c.canalVenta as any;
+            changed = true;
+          }
+
+          const fetchedPriceCode = extractCustomerPriceCode(c);
+          if (fetchedPriceCode) {
+            const currentCode = extractCustomerPriceCode(prev);
+            if (currentCode !== fetchedPriceCode) {
+              next.clasificacionPrecios = fetchedPriceCode;
+              changed = true;
+            }
+          }
+
+          return changed ? next : prev;
+        });
+
         const dir = (c as any).direccionList?.[0] || (c as any).direccionEntrega || (c as any).direccion;
         const dept = dir?.departamento || (c as any).departamento || "";
         const muni = dir?.municipio || (c as any).municipio || "";
@@ -774,7 +978,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         }
       }
     })();
-  }, [customer?.codigoCliente, selectedAddressId]);
+  }, [customer, selectedAddressId]);
 
   const itemsGross = useMemo(
     () => items.reduce((acc, it) => acc + (it.subtotalSinDescuento ?? it.subtotal ?? it.cantidad * it.precioUnitario), 0),
@@ -867,8 +1071,18 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     return peekTempOrderNumber(vendorCode, orderSeries, companyCode);
   }, [isOnline, vendorCode, orderSeries, companyCode]);
 
-  const canUseCombos = !!customer && customer.tipoCliente === "Mayorista";
+  const canUseCombos = !!customer;
   const canSave = !!customer && items.length > 0;
+  const saveBlockedReason = useMemo(() => {
+    if (!customer) return "Selecciona un cliente";
+    if (items.length === 0) return "Agrega al menos un producto";
+    return null;
+  }, [customer, items.length]);
+
+  // Marcar hidratación/montaje en consola para detectar falta de bindings de eventos
+  useEffect(() => {
+    console.debug("[OrderFormFull] montado/hidratado", { hasCustomer: !!customer, items: items.length });
+  }, [customer, items.length]);
 
   const handlePickProducts = (newItems: OrderItem[]) => {
     const next = [...items];
@@ -877,11 +1091,14 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         (x) => x.productoId === ni.productoId && !x.comboId && !x.kitId
       );
       if (idx >= 0) {
-        const mergedQty = next[idx].cantidad + ni.cantidad;
-        const bruto = Math.round(mergedQty * next[idx].precioUnitario * 100) / 100;
+        const unit = Number.isFinite(ni.precioUnitario) ? ni.precioUnitario : next[idx].precioUnitario;
+        const bruto = Math.round(ni.cantidad * unit * 100) / 100;
         next[idx] = {
           ...next[idx],
-          cantidad: mergedQty,
+          ...ni,
+          id: next[idx].id,
+          cantidad: ni.cantidad,
+          precioUnitario: unit,
           subtotal: bruto,
           subtotalSinDescuento: bruto,
         };
@@ -891,76 +1108,20 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
       }
     }
     recalcItemsWithOffer(next);
+    // No cerrar el modal automáticamente, el usuario debe cerrarlo manualmente
   };
 
   const handlePickComboItems = (comboItems: OrderItem[]) => {
     const prepared = comboItems.map((it) => {
-      const bruto = Math.round(it.cantidad * it.precioUnitario * 100) / 100;
+      const bruto =
+        typeof it.subtotal === "number"
+          ? Math.round(it.subtotal * 100) / 100
+          : Math.round(it.cantidad * it.precioUnitario * 100) / 100;
       return { ...it, subtotal: bruto, subtotalSinDescuento: bruto };
     });
     recalcItemsWithOffer([...items, ...prepared]);
   };
 
-  const onConfirm = async () => {
-    if (!canSave) return;
-    try {
-      const localId = uuidSimple();
-      const codigoEmpresa = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR")?.codigoEmpresa ?? "E01";
-      const codigoVendedor = user?.usuarioConfiguracion?.find((i: any) => i.configuracion === "CODIGO_VENDEDOR")?.valor ?? "";
-      const onlineStatus = typeof navigator !== "undefined" ? navigator.onLine : true;
-      const numeroPedidoTemporal = onlineStatus ? undefined : nextTempOrderNumber(codigoVendedor, orderSeries, codigoEmpresa);
-
-      const payload: Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> = {
-        localId,
-        serverId: null,
-        codigoEmpresa,
-        codigoVendedor,
-        seriePedido: orderSeries,
-        nombreVendedor: user?.nombre || user?.nombre || codigoVendedor,
-        fecha: new Date().toISOString(),
-        estado: "ingresado",
-        codigoCliente: customer!.codigoCliente,
-        nombreCliente: customer?.nombreCliente,
-        nombreClienteEnvio: customer?.nombreCliente,
-        items,
-        discount,
-        subtotal: itemsTotal,
-        total,
-        ordenCompra: purchaseOrder || undefined,
-        observaciones: notes || undefined,
-        direccionEntrega: customerAddress || undefined,
-        departamento: customerDept || undefined,
-        municipio: customerMunicipio || undefined,
-        formaPago: paymentMethod || undefined,
-        bodega: warehouse || defaultWarehouse || undefined,
-        telefonoEntrega: customerPhone || undefined,
-        contactoEntrega: customerContact || undefined,
-        numeroPedidoTemporal,
-        // Incluir metadata de oferta si existe (se mantiene compatibilidad con el primer elemento)
-        ofertaAplicada: appliedOffers[0]
-          ? {
-              uuidOferta: appliedOffers[0].offer.serverId || appliedOffers[0].offer.id,
-              nombreOferta: appliedOffers[0].offer.name,
-              tipoOferta: appliedOffers[0].offer.type,
-              descuentoPorcentaje: appliedOffers[0].offer.discount?.type === "percentage" ? (appliedOffers[0].offer.discount?.value as any) : undefined,
-              descuentoMonto: appliedOffers.reduce((acc, o) => acc + (o.potentialDiscount || 0), 0),
-            }
-          : undefined,
-        descuentoTotal: Math.max(0, offersDiscount + generalDiscountAmount),
-        subtotalSinDescuento: itemsGross || undefined,
-        notes,
-        photos,
-        location,
-      };
-      await addOrder(payload);
-      // await syncOrders();
-    } catch (e) {
-      console.error("Error al guardar el pedido:", e);
-    } finally {
-      localStorage.removeItem("pedido_draft"); // <-- limpia el draft
-      onClose();
-    }
-  };
 
   const handleApplyOffer = (app: ApplicableOffer, baseItems?: OrderItem[]) => {
     // Bonificación: crea líneas bonificadas con 100% de descuento y marca de trazabilidad
@@ -1016,6 +1177,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         const defaultPid = options[0]?.codigoProducto;
         const draft: Record<string, number> = defaultPid ? { [defaultPid]: totalBonusQty } : {};
         setPendingBonus({ app, applications, draftQuantities: draft });
+        setOffersOpen(false); // cerrar el modal de ofertas para que el picker quede al frente
         setShowBonusPicker(true);
         return;
       }
@@ -1028,6 +1190,22 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         const qty = ap.bonusQty;
         const price = prod?.precio ?? 0;
         const bruto = Math.round(price * qty * 100) / 100;
+        const codigoProveedor = prod?.codigoProveedor != null ? String(prod.codigoProveedor) : undefined;
+        const nombreProveedor = prod?.proveedor ?? undefined;
+        const codigoLinea = prod?.codigoLinea ?? prod?.codigoFiltroVenta ?? (prod as any)?.lineaVenta ?? undefined;
+        const nombreLinea = prod?.linea ?? prod?.filtroVenta ?? undefined;
+        const offerCode = pickReferenceCode(
+          app.offer.codigoOferta,
+          app.offer.referenceCode,
+          (app.offer as any)?.codigoReferencia,
+          (app.offer as any)?.codigoOferta,
+          app.offer.id,
+          app.offer.serverId
+        );
+        const sourceIds = (ap.sourceItemIds || []).map((sid) => String(sid));
+        const resolvedParentId = sourceIds
+          .map((sid) => items.find((it) => it.id === sid || String(it.productoId) === sid)?.id)
+          .find((val): val is string => Boolean(val));
         bonusLines.push({
           id: `${promoId}-bonus-${idx}-${Date.now()}`,
           productoId: targetPid,
@@ -1043,6 +1221,14 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
           ofertaIdAplicada: promoId,
           ofertaNombre: app.offer.name,
           tipoOferta: "bonus",
+          ofertaCodigo: offerCode ?? null,
+          codigoOferta: offerCode ?? null,
+          codigoProveedor: codigoProveedor ?? null,
+          nombreProveedor: nombreProveedor ?? null,
+          codigoLinea: codigoLinea ?? null,
+          nombreLinea: nombreLinea ?? null,
+          parentItemId: resolvedParentId ?? null,
+          relatedItemIds: sourceIds.length ? sourceIds : undefined,
         });
       });
 
@@ -1083,6 +1269,160 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
       }));
   };
 
+  const resetOrderState = () => {
+    setCustomer(null);
+    setItems([]);
+    setDiscount(0);
+    setNotes("");
+    setPhotos([]);
+    setLocation(null);
+    setPurchaseOrder("");
+    setCustomerAddress("");
+    setCustomerDept("");
+    setCustomerMunicipio("");
+    setCustomerContact("");
+    setCustomerPhone("");
+    setPaymentMethod("Contado");
+    setWarehouse(defaultWarehouse || warehouse || "01");
+    setAddressOptions([]);
+    setSelectedAddressId("");
+    setSummaryOpen(true);
+    setPendingAppliedOfferIds([]);
+    setApplicableOffers([]);
+    setAppliedOffers([]);
+    setOffersOpen(false);
+    setExpandedOfferId(null);
+    setPendingBonus(null);
+    setBonusOptions([]);
+    setBonusSearch("");
+    setBonusProviderFilter(null);
+    setBonusLineFilter(null);
+    setShowBonusPicker(false);
+    setPendingCustomerChange(null);
+    setShowChangeCustomerModal(false);
+    setShowCloseModal(false);
+    setOpenCustomer(false);
+    setOpenProducts(false);
+    setOpenCombos(false);
+    bonusAlertKeyRef.current = "";
+    gpsRequested.current = false;
+    setGpsLoading(false);
+  };
+
+  const handleConfirmOrder = async () => {
+    if (isSaving) return;
+    if (!canSave || !customer) {
+      toast({
+        variant: "destructive",
+        title: "Completa el pedido",
+        description: saveBlockedReason || "Selecciona un cliente y productos para continuar.",
+      });
+      return;
+    }
+    if (pendingBonus && pendingBonusQty > 0) {
+      toast({
+        variant: "destructive",
+        title: "Bonificación pendiente",
+        description: "Distribuye todas las unidades bonificadas antes de confirmar.",
+      });
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      const normalizedItems = items.map((it) => {
+        const lineSubtotal = round2(it.subtotal ?? it.cantidad * it.precioUnitario);
+        const lineSubtotalRaw = round2(it.subtotalSinDescuento ?? it.subtotal ?? it.cantidad * it.precioUnitario);
+        const lineTotal = round2(it.total ?? lineSubtotal);
+        return {
+          ...it,
+          subtotal: lineSubtotal,
+          subtotalSinDescuento: lineSubtotalRaw,
+          total: lineTotal,
+        } as OrderItem;
+      });
+
+      const preparedItems = prepareOrderItemsForPersistence(normalizedItems, {
+        lookupProduct: (pid) => productMap.get(String(pid)) ?? undefined,
+      });
+
+      const now = new Date();
+      const numeroTemporal = !isOnline ? nextTempOrderNumber(vendorCode, orderSeries, companyCode) : undefined;
+      const sanitizedNotes = (notes || "").trim().slice(0, 500);
+      const cleanPurchaseOrder = purchaseOrder.trim();
+      const cleanAddress = customerAddress.trim();
+      const cleanDept = customerDept.trim();
+      const cleanMunicipio = customerMunicipio.trim();
+      const cleanContact = customerContact.trim();
+      const cleanPhone = customerPhone.trim();
+      const subtotal = round2(preparedItems.reduce((acc, it) => acc + (it.subtotal ?? 0), 0));
+      const subtotalSinDescuento = round2(itemsGrossWithoutBonus);
+      const discountTotal = round2(offersDiscount + generalDiscountAmount);
+      const payload: OrderPayload = {
+        localId: uuidSimple(),
+        serverId: null,
+        codigoEmpresa: companyCode || "E01",
+        codigoCliente: customer.codigoCliente,
+        nombreCliente: customer.nombreCliente,
+        codigoVendedor: vendorCode || user?.usuario || "VND",
+        fecha: now.toISOString(),
+        estado: "ingresado",
+        items: preparedItems,
+        subtotal,
+        total: round2(total),
+        impuestos: 0,
+        observaciones: sanitizedNotes || undefined,
+        discount: generalDiscountPct,
+        notes: sanitizedNotes,
+        photos: photos.slice(0, 10),
+        location,
+        ordenCompra: cleanPurchaseOrder || undefined,
+        formaPago: paymentMethod,
+        bodega: (warehouse || defaultWarehouse || "01").toString(),
+        direccionEntrega: cleanAddress || undefined,
+        departamento: cleanDept || undefined,
+        municipio: cleanMunicipio || undefined,
+        telefonoEntrega: cleanPhone || undefined,
+        contactoEntrega: cleanContact || undefined,
+        nombreClienteEnvio: customer.nombreCliente,
+        nombreVendedor: user?.nombre ?? user?.usuario ?? undefined,
+        seriePedido: orderSeries,
+        numeroPedidoTemporal: numeroTemporal,
+        subtotalSinDescuento,
+        descuentoTotal: discountTotal,
+        customerId: customer.codigoCliente,
+      };
+
+      await addOrder(payload);
+      try {
+        await syncOrders();
+      } catch (syncError) {
+        console.warn("[OrderFormFull] syncOrders error", syncError);
+      }
+
+      toast({
+        title: "Pedido guardado",
+        description: numeroTemporal
+          ? `Se almacenó como ${numeroTemporal} y se enviará al reconectar.`
+          : "Estamos sincronizando con el servidor.",
+      });
+
+      resetOrderState();
+      localStorage.removeItem("pedido_draft");
+      onClose();
+    } catch (error: any) {
+      console.error("[OrderFormFull] error confirmando pedido", error);
+      toast({
+        variant: "destructive",
+        title: "No se pudo guardar",
+        description: error?.message || "Revisa tu conexión e inténtalo nuevamente.",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+
   return (
     // 👇 Contenedor principal con fondo y padding
     <div className="flex h-full flex-col bg-gray-50 dark:bg-neutral-900 rounded-xl shadow-lg border border-gray-200 dark:border-neutral-800">
@@ -1091,18 +1431,13 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         className="sticky top-0 z-10 bg-white/95 dark:bg-neutral-900/95 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:supports-[backdrop-filter]:bg-neutral-900/60 border-b border-gray-200 dark:border-neutral-800"
       >
         <div className="flex items-center justify-between px-4 py-3">
-          <Badge variant="secondary" className="bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100 border-blue-200 dark:border-blue-800">
-            Nuevo Pedido
-          </Badge>
           <div className="flex items-center gap-2">
-
-<Button
-  variant="destructive"
-  onClick={() => setShowCloseModal(true)}
->
-  Cerrar
-</Button>
-
+            <Button
+              variant="destructive"
+              onClick={() => setShowCloseModal(true)}
+            >
+              Cerrar
+            </Button>
             <Button
               variant="secondary"
               onClick={() => setOffersOpen(true)}
@@ -1118,89 +1453,85 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                 <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-pink-100 text-pink-800">{applicableOffers.length}</span>
               )}
             </Button>
-
             <Button
-              onClick={onConfirm}
-              disabled={!canSave}
+              onClick={handleConfirmOrder}
+              disabled={!canSave || isSaving}
               className="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow"
+              aria-busy={isSaving}
             >
-              Confirmar · Q{total.toFixed(2)}
+              {isSaving ? "Guardando..." : `Confirmar · Q${total.toFixed(2)}`}
             </Button>
           </div>
         </div>
       </div>
 
+      {/* Controles de panel en móvil */}
+      <div className="md:hidden px-4 pt-3 space-y-2">
+        <Card className="p-0 rounded-xl border border-blue-100 shadow-sm">
+          <button
+            type="button"
+            className="w-full flex items-center justify-between px-4 py-3 text-left"
+            onClick={() => setShowLeftPanel((v) => !v)}
+            aria-expanded={showLeftPanel}
+          >
+            <div>
+              <span className="inline-flex items-center rounded-full bg-blue-50 text-blue-700 text-[11px] font-semibold tracking-wide uppercase px-2 py-0.5">
+                Encabezado
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-blue-700 uppercase tracking-wide">
+              {showLeftPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </button>
+        </Card>
+      </div>
       {/* Cuerpo con scroll interno */}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 space-y-4">
         {/* Layout responsive: una columna en móvil, 2/3 en desktop */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Columna izquierda (arriba en móvil) */}
-          <div className="space-y-3">
-
+          <div className={(showLeftPanel ? "" : "hidden ") + "md:block space-y-3"}>
             {/* Geolocalización */}
-          <Card className="p-4 space-y-3 rounded-xl shadow border border-green-100 dark:border-green-900 bg-white dark:bg-neutral-800">
-            <div className="flex items-center gap-2">
-              <MapPin className="w-4 h-4 text-green-600" />
-              <div className="font-semibold text-green-900 dark:text-green-100">Geoposición</div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="text-x">
-                {gpsLoading ? (
-                  <span className="flex items-center gap-2 text-green-600">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                    </svg>
-                    Obteniendo ubicación…
-                  </span>
-                ) : location ? (
-                  <span className="text-green-600">Ubicación capturada ✓</span>
-                ) : (
-                  <span className="text-muted-foreground">Sin capturar</span>
+            <Card className="p-2 space-y-2 rounded-xl shadow border border-green-100 dark:border-green-900 bg-white dark:bg-neutral-800">
+              <div className="flex items-center gap-2 mb-1">
+                <MapPin className="w-4 h-4 text-green-600" />
+                <span className="font-semibold text-green-900 dark:text-green-100 text-sm">Geoposición</span>
+                {location && (
+                  <span className="ml-2 text-green-600 text-xs">✓</span>
                 )}
               </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={captureGeo}
-                disabled={gpsLoading}
-              >
-                {gpsLoading ? (
-                  <span className="flex items-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                    </svg>
-                    Cargando…
-                  </span>
-                ) : (
-                  "Obtener"
+              <div className="flex items-center justify-between">
+                <div className="text-xs">
+                  {gpsLoading ? (
+                    <span className="flex items-center gap-2 text-green-600">Obteniendo ubicación…</span>
+                  ) : location ? (
+                    <span className="text-green-600">Ubicación capturada</span>
+                  ) : (
+                    <span className="text-muted-foreground">Sin capturar</span>
+                  )}
+                </div>
+                {!isDraft && !location && (
+                  <Button size="sm" variant="secondary" onClick={captureGeo} disabled={gpsLoading}>
+                    Obtener
+                  </Button>
                 )}
-              </Button>
-            </div>
-            {location && (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              </div>
+              {location && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                   <span>lat: <span className="font-mono text-green-800 dark:text-green-200">{location.lat.toFixed(5)}</span></span>
                   <span>lng: <span className="font-mono text-green-800 dark:text-green-200">{location.lng.toFixed(5)}</span></span>
+                  <a
+                    href={`https://maps.google.com/?q=${location.lat},${location.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-green-700 dark:text-green-300 hover:underline text-xs font-medium"
+                  >
+                    <MapPin className="w-3 h-3" />
+                    Ver en Google Maps
+                  </a>
                 </div>
-                {/* Mini-mapa estático */}
-                <div className="rounded-lg overflow-hidden border border-green-200 dark:border-green-800 shadow w-full max-w-xs">
-                </div>
-                {/* Link a Google Maps */}
-                <a
-                  href={`https://maps.google.com/?q=${location.lat},${location.lng}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-green-700 dark:text-green-300 hover:underline text-xs font-medium mt-1"
-                >
-                  <MapPin className="w-3 h-3" />
-                  Ver en Google Maps
-                </a>
-              </div>
-            )}
-          </Card>
-
+              )}
+            </Card>
             {/* Fotos */}
             <Card className="p-4 space-y-3 rounded-xl shadow border border-gray-100 dark:border-neutral-800 bg-white dark:bg-neutral-800">
               <div className="flex items-center gap-2">
@@ -1209,14 +1540,12 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
               </div>
               <OrderPhotos photos={photos} onChange={setPhotos} />
             </Card>
-
             {/* Cliente */}
             <Card className="p-4 space-y-3 rounded-xl shadow border border-blue-100 dark:border-blue-900 bg-white dark:bg-neutral-800">
               <div className="flex items-center gap-2">
                 <User className="w-4 h-4 text-blue-600" />
                 <div className="font-semibold text-blue-900 dark:text-blue-100">Cliente</div>
               </div>
-
               {!customer ? (
                 <Button variant="secondary" onClick={() => setOpenCustomer(true)}>
                   Seleccionar cliente
@@ -1236,155 +1565,267 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                 </div>
               )}
             </Card>
-      </div>
-
-          {/* Columna derecha (abajo en móvil) */}
+          </div>
           <div className="lg:col-span-2 space-y-3">
-            {/* Productos / Combos */}
-            <Card className="p-4 space-y-3 rounded-xl shadow border border-yellow-100 dark:border-yellow-900 bg-white dark:bg-neutral-800">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  <Package className="w-4 h-4 text-yellow-600" />
-                  <div className="font-semibold text-yellow-900 dark:text-yellow-100">
-                    Productos / Combos / Kits
-                  </div>
+            <Card className="p-0 rounded-xl shadow border border-yellow-100 dark:border-yellow-900 bg-white dark:bg-neutral-800">
+              <button
+                type="button"
+                className="w-full flex items-center justify-between px-4 py-3 text-left"
+                onClick={() => setShowProductsPanel((v) => !v)}
+                aria-expanded={showProductsPanel}
+              >
+                <div>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-yellow-50 text-yellow-700 text-[11px] font-semibold tracking-wide uppercase px-2 py-0.5">
+                    <Package className="w-3 h-3" />
+                    Productos
+                  </span>
+                  <div className="mt-1 text-sm font-semibold text-yellow-900 dark:text-yellow-100">Productos / Combos / Kits</div>
+                  <div className="text-xs text-muted-foreground">{items.length} seleccionados · {selectedCount} unidades</div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" onClick={() => setOpenProducts(true)} disabled={!customer}>
-                    Agregar productos
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={() => setOpenCombos(true)}
-                    disabled={!canUseCombos || !customer}
-                  >
-                    <Gift className="w-4 h-4 mr-1 text-pink-600" /> Combos / Kits
-                  </Button>
-                </div>
-              </div>
 
-              {items.length === 0 && (
-                <div className="text-sm text-muted-foreground">Aún no hay ítems agregados.</div>
-              )}
-              {items.map((it) => {
-                const isBonus = !!it.esBonificacion;
-                const canDecrease = it.cantidad > 1 && !isBonus; // evitamos bajar/romper bonificaciones
-                return (
-                  <div
-                    key={it.id}
-                    className={`grid grid-cols-12 gap-2 items-center border rounded-lg p-2 shadow-sm ${
-                      isBonus ? 'bg-amber-50 border-amber-200 dark:bg-amber-900/15 dark:border-amber-800' : 'bg-yellow-50 dark:bg-yellow-900/20'
-                    }`}
-                  >
-                    <div className="col-span-5 space-y-1">
-                      <div className="font-medium flex items-center gap-2">
-                        {isBonus ? (
-                          <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50">Boni</Badge>
-                        ) : null}
-                        <span>{it.descripcion}</span>
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        Precio: Q{it.precioUnitario.toFixed(2)}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Bruto: Q{(it.subtotalSinDescuento ?? it.cantidad * it.precioUnitario).toFixed(2)}
-                        {it.descuentoLinea ? ` · Desc: Q${it.descuentoLinea.toFixed(2)}` : ""}
-                        {it.descuentoLinea ? ` · Neto: Q${(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}` : ""}
-                      </div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-blue-700 uppercase tracking-wide">
+              {showLeftPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+
+              </button>
+              {showProductsPanel && (
+                <div className="p-4 space-y-3 border-t border-yellow-100 dark:border-yellow-900">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2 text-yellow-800 dark:text-yellow-100 font-semibold text-sm">
+                      <Package className="w-4 h-4" />
+                      <span>Carrito de productos</span>
                     </div>
-                    <div className="col-span-4 flex items-center gap-1">
-                      {isBonus ? (
-                        <div className="flex items-center gap-2 text-yellow-900 dark:text-yellow-100 font-semibold">
-                          <span className="px-2">{it.cantidad}</span>
-                          <Badge variant="secondary" className="bg-amber-100 text-amber-800 border-amber-300">Fijo por boni</Badge>
-                        </div>
-                      ) : (
-                        <>
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            className="text-yellow-700 border-yellow-300 hover:bg-yellow-100 dark:text-yellow-200 dark:border-yellow-700"
-                            onClick={() => {
-                              if (canDecrease) {
-                                const next = items.map((x) =>
-                                  x.id === it.id
-                                    ? (() => {
-                                        const nuevaCantidad = x.cantidad - 1;
-                                        const bruto = Math.round(nuevaCantidad * x.precioUnitario * 100) / 100;
-                                        return {
-                                          ...x,
-                                          cantidad: nuevaCantidad,
-                                          subtotal: bruto,
-                                          subtotalSinDescuento: bruto,
-                                          descuentoLinea: undefined,
-                                        };
-                                      })()
-                                    : x
-                                );
-                                recalcItemsWithOffer(next);
-                              }
-                            }}
-                            disabled={!canDecrease}
-                            title="Menos"
-                          >
-                            –
-                          </Button>
-                          <span className="px-2 font-semibold text-yellow-900 dark:text-yellow-100">{it.cantidad}</span>
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            className="text-yellow-700 border-yellow-300 hover:bg-yellow-100 dark:text-yellow-200 dark:border-yellow-700"
-                            onClick={() => {
-                              const next = items.map((x) =>
-                                x.id === it.id
-                                  ? (() => {
-                                      const nuevaCantidad = x.cantidad + 1;
-                                      const bruto = Math.round(nuevaCantidad * x.precioUnitario * 100) / 100;
-                                      return {
-                                        ...x,
-                                        cantidad: nuevaCantidad,
-                                        subtotal: bruto,
-                                        subtotalSinDescuento: bruto,
-                                        descuentoLinea: undefined,
-                                      };
-                                    })()
-                                  : x
-                              );
-                              recalcItemsWithOffer(next);
-                            }}
-                            title="Más"
-                          >
-                            +
-                          </Button>
-                        </>
-                      )}
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="secondary"
+                        onClick={() => setOpenProducts(true)}
+                        disabled={!customer || priceListLoading}
+                        title={!customer ? "Selecciona un cliente" : priceListLoading ? "Sincronizando listas de precio" : "Agregar productos"}
+                      >
+                        Agregar productos
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => setOpenCombos(true)}
+                        disabled={!canUseCombos}
+                      >
+                        <Gift className="w-4 h-4 mr-1 text-pink-600" /> Combos / Kits
+                      </Button>
                     </div>
-                    <div className="col-span-2 text-right font-semibold text-yellow-800 dark:text-yellow-200">
-                      Q{(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}
-                    </div>
-                    <div className="col-span-1 text-right flex justify-end">
-                      {isBonus ? (
-                        <Badge variant="secondary" className="bg-amber-100 text-amber-800 border-amber-300">Boni</Badge>
-                      ) : (
+                    {priceListLoading && (
+                      <div className="text-xs text-muted-foreground flex items-center gap-2">
+                        Sincronizando listas de precio…
+                      </div>
+                    )}
+                    {priceListError && (
+                      <div className="text-xs text-red-600 flex items-center gap-2">
+                        {priceListError}
                         <Button
-                          variant="destructive"
-                          size="icon"
-                          className="bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800"
-                          onClick={() => {
-                            const filtered = items.filter((x) => x.id !== it.id);
-                            recalcItemsWithOffer(filtered);
-                          }}
-                          title="Quitar"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2"
+                          onClick={retryPriceLists}
                         >
-                          ✕
+                          Reintentar
                         </Button>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </div>
-                );
-              })}
-            </Card>
+                  {items.length === 0 && (
+                    <div className="text-sm text-muted-foreground">Aún no hay ítems agregados.</div>
+                  )}
 
+                  {comboGroups.map((group) => {
+                    const resolvedComboCode = pickReferenceCode(
+                      group.offerCode,
+                      group.comboCode,
+                      group.items[0]?.codigoOferta,
+                      group.items[0]?.ofertaCodigo,
+                      group.items[0]?.comboCode
+                    );
+                    const comboCode = resolvedComboCode ?? "-";
+                    const comboName = group.comboName || group.items[0]?.descripcion || "Combo/Kit";
+                    const quantity = resolveComboGroupQuantity(group);
+                    const unitPrice = resolveComboGroupUnitPrice(group);
+                    const detailOpen = !!openComboDetails[group.key];
+                    return (
+                      <div
+                        key={group.key}
+                        className="border rounded-lg p-3 shadow-sm bg-yellow-50 dark:bg-yellow-900/20"
+                      >
+                        <div className="grid grid-cols-12 gap-2 items-center text-sm text-yellow-900 dark:text-yellow-100">
+                          <div className="col-span-2 font-mono text-xs">{comboCode}</div>
+                          <div className="col-span-5 font-semibold">{comboName}</div>
+                          <div className="col-span-1 text-center">{quantity}</div>
+                          <div className="col-span-2 text-right">Q{unitPrice.toFixed(2)}</div>
+                          <div className="col-span-2 text-right font-semibold">Q{group.totalPrice.toFixed(2)}</div>
+                        </div>
+                        <div className="mt-3 flex justify-end gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-yellow-300 text-yellow-800 hover:bg-yellow-100 dark:border-yellow-700 dark:text-yellow-100 dark:hover:bg-yellow-900/40"
+                            onClick={() => toggleComboDetail(group.key)}
+                          >
+                            {detailOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-600 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-900/40"
+                            onClick={() => removeComboGroup(group)}
+                          >
+                            Quitar
+                          </Button>
+                        </div>
+                        {detailOpen && (
+                          <div className="mt-3 border-l-2 border-yellow-200 dark:border-yellow-800 pl-4 space-y-1">
+                            {group.items.map((line) => {
+                              const detailCode = pickReferenceCode(
+                                line.codigoOferta,
+                                line.ofertaCodigo,
+                                line.comboCode,
+                                resolvedComboCode
+                              ) ?? comboCode;
+                              const detailProduct = productMap.get(String(line.productoId));
+                              const detailName = line.descripcion || detailProduct?.descripcion || String(line.productoId);
+                              return (
+                                <div
+                                  key={line.id}
+                                  className="grid grid-cols-12 gap-2 items-center text-xs text-muted-foreground"
+                                >
+                                  <div className="col-span-3 font-mono">{detailCode}</div>
+                                  <div className="col-span-7">{detailName}</div>
+                                  <div className="col-span-2 text-center text-yellow-900 dark:text-yellow-100">{line.cantidad}</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {normalItems.map((it) => {
+                    const isBonus = !!it.esBonificacion;
+                    const canDecrease = it.cantidad > 1 && !isBonus; // evitamos bajar/romper bonificaciones
+                    return (
+                      <div
+                        key={it.id}
+                        className={`grid grid-cols-12 gap-2 items-center border rounded-lg p-2 shadow-sm ${
+                          isBonus ? 'bg-amber-50 border-amber-200 dark:bg-amber-900/15 dark:border-amber-800' : 'bg-yellow-50 dark:bg-yellow-900/20'
+                        }`}
+                      >
+                        <div className="col-span-5 space-y-1">
+                          <div className="font-medium flex items-center gap-2">
+                            {isBonus ? (
+                              <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50">Boni</Badge>
+                            ) : null}
+                            <span>{it.descripcion}</span>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            Precio: Q{it.precioUnitario.toFixed(2)}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            Bruto: Q{(it.subtotalSinDescuento ?? it.cantidad * it.precioUnitario).toFixed(2)}
+                            {it.descuentoLinea ? ` · Desc: Q${it.descuentoLinea.toFixed(2)}` : ""}
+                            {it.descuentoLinea ? ` · Neto: Q${(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}` : ""}
+                          </div>
+                        </div>
+                        <div className="col-span-4 flex items-center gap-1">
+                          {isBonus ? (
+                            <div className="flex items-center gap-2 text-yellow-900 dark:text-yellow-100 font-semibold">
+                              <span className="px-2">{it.cantidad}</span>
+                              <Badge variant="secondary" className="bg-amber-100 text-amber-800 border-amber-300">Fijo por boni</Badge>
+                            </div>
+                          ) : (
+                            <>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="text-yellow-700 border-yellow-300 hover:bg-yellow-100 dark:text-yellow-200 dark:border-yellow-700"
+                                onClick={() => {
+                                  if (canDecrease) {
+                                    const next = items.map((x) =>
+                                      x.id === it.id
+                                        ? (() => {
+                                            const nuevaCantidad = x.cantidad - 1;
+                                            const bruto = Math.round(nuevaCantidad * x.precioUnitario * 100) / 100;
+                                            return {
+                                              ...x,
+                                              cantidad: nuevaCantidad,
+                                              subtotal: bruto,
+                                              subtotalSinDescuento: bruto,
+                                              descuentoLinea: undefined,
+                                            };
+                                          })()
+                                        : x
+                                    );
+                                    recalcItemsWithOffer(next);
+                                  }
+                                }}
+                                disabled={!canDecrease}
+                                title="Menos"
+                              >
+                                –
+                              </Button>
+                              <span className="px-2 font-semibold text-yellow-900 dark:text-yellow-100">{it.cantidad}</span>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="text-yellow-700 border-yellow-300 hover:bg-yellow-100 dark:text-yellow-200 dark:border-yellow-700"
+                                onClick={() => {
+                                  const next = items.map((x) =>
+                                    x.id === it.id
+                                      ? (() => {
+                                          const nuevaCantidad = x.cantidad + 1;
+                                          const bruto = Math.round(nuevaCantidad * x.precioUnitario * 100) / 100;
+                                          return {
+                                            ...x,
+                                            cantidad: nuevaCantidad,
+                                            subtotal: bruto,
+                                            subtotalSinDescuento: bruto,
+                                            descuentoLinea: undefined,
+                                          };
+                                        })()
+                                      : x
+                                  );
+                                  recalcItemsWithOffer(next);
+                                }}
+                                title="Más"
+                              >
+                                +
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                        <div className="col-span-2 text-right font-semibold text-yellow-800 dark:text-yellow-200">
+                          Q{(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}
+                        </div>
+                        <div className="col-span-1 text-right flex justify-end">
+                          {isBonus ? (
+                            <Badge variant="secondary" className="bg-amber-100 text-amber-800 border-amber-300">Boni</Badge>
+                          ) : (
+                            <Button
+                              variant="destructive"
+                              size="icon"
+                              className="bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800"
+                              onClick={() => {
+                                const filtered = items.filter((x) => x.id !== it.id);
+                                recalcItemsWithOffer(filtered);
+                              }}
+                              title="Quitar"
+                            >
+                              ✕
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
             {/* Resumen */}
             <Card className="p-0 rounded-xl shadow border border-gray-200 dark:border-neutral-800 bg-white dark:bg-neutral-800">
               <button
@@ -1393,7 +1834,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                 onClick={() => setSummaryOpen((v) => !v)}
               >
                 <div className="font-semibold">Resumen</div>
-                <span className="text-sm text-muted-foreground">{summaryOpen ? "Ocultar" : "Mostrar"}</span>
+            <div className="flex items-center gap-2 text-xs font-semibold text-blue-700 uppercase tracking-wide">
+              {showLeftPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
               </button>
               {summaryOpen && (
                 <div className="p-4 space-y-3 border-t border-gray-200 dark:border-neutral-800">
@@ -1409,14 +1852,6 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                           setDiscount(Math.max(0, Math.min(100, Number(e.target.value || 0))))
                         }
                         placeholder="0"
-                      />
-                    </div>
-                    <div>
-                      <Label>Orden de compra</Label>
-                      <Input
-                        value={purchaseOrder}
-                        onChange={(e) => setPurchaseOrder(e.target.value)}
-                        placeholder="Opcional"
                       />
                     </div>
                     <div>
@@ -1436,6 +1871,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         value={paymentMethod}
                         onChange={(e) => setPaymentMethod(e.target.value)}
+                        disabled={true}
                       >
                         {["Contado", "Credito", "Transferencia", "Tarjeta", "Cheque"].map((opt) => (
                           <option key={opt} value={opt}>{opt}</option>
@@ -1448,6 +1884,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         value={warehouse}
                         onChange={(e) => setWarehouse(e.target.value)}
+                        disabled={true}
                       >
                         {([defaultWarehouse, "01", "02", "04", "09"].filter(Boolean) as string[])
                           .filter((v, idx, arr) => arr.indexOf(v) === idx)
@@ -1474,6 +1911,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                               setCustomerPhone(found.telefono || "");
                             }
                           }}
+                          disabled={true}
                         >
                           {addressOptions.map((opt) => (
                             <option key={opt.id} value={opt.id}>{opt.direccion}</option>
@@ -1484,6 +1922,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                           value={customerAddress}
                           onChange={(e) => setCustomerAddress(e.target.value)}
                           placeholder="Dirección de entrega"
+                          disabled={true}
                         />
                       )}
                     </div>
@@ -1493,6 +1932,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         value={customerDept}
                         onChange={(e) => setCustomerDept(e.target.value)}
                         placeholder="Departamento"
+                        disabled={true}
                       />
                     </div>
                     <div>
@@ -1501,6 +1941,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         value={customerMunicipio}
                         onChange={(e) => setCustomerMunicipio(e.target.value)}
                         placeholder="Municipio"
+                        disabled={true}
                       />
                     </div>
                     <div>
@@ -1509,6 +1950,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         value={customerContact}
                         onChange={(e) => setCustomerContact(e.target.value)}
                         placeholder="Persona de contacto"
+                        disabled={true}
                       />
                     </div>
                     <div>
@@ -1517,6 +1959,15 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                         value={customerPhone}
                         onChange={(e) => setCustomerPhone(e.target.value)}
                         placeholder="Teléfono de entrega"
+                        disabled={true}
+                      />
+                    </div>
+                    <div>
+                      <Label>Orden de compra</Label>
+                      <Input
+                        value={purchaseOrder}
+                        onChange={(e) => setPurchaseOrder(e.target.value)}
+                        placeholder="Opcional"
                       />
                     </div>
                     <div className="md:col-span-2">
@@ -1530,10 +1981,78 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                     </div>
                   </div>
                   {items.length > 0 && (
-                    <div className="space-y-2">
+                    <div className="space-y-1">
                       <div className="text-xs font-semibold text-muted-foreground">Detalle de productos</div>
-                      <div className="divide-y divide-gray-200 dark:divide-neutral-800 rounded-lg border border-gray-200 dark:border-neutral-800 overflow-hidden">
-                        {items.map((it) => {
+                      <div className="divide-y divide-gray-200 dark:divide-neutral-800 rounded-md border border-gray-200 dark:border-neutral-800 overflow-hidden">
+                        {comboGroups.map((group) => {
+                          if (!group.items.length) return null;
+                          const resolvedComboCode = pickReferenceCode(
+                            group.offerCode,
+                            group.comboCode,
+                            group.items[0]?.codigoOferta,
+                            group.items[0]?.ofertaCodigo,
+                            group.items[0]?.comboCode
+                          );
+                          const comboCode = resolvedComboCode ?? "-";
+                          const comboName = group.comboName || group.items[0]?.descripcion || "Combo/Kit";
+                          const quantity = resolveComboGroupQuantity(group);
+                          const gross = group.items.reduce((acc, line) => {
+                            const lineGross = line.subtotalSinDescuento ?? line.subtotal ?? line.cantidad * line.precioUnitario;
+                            return acc + lineGross;
+                          }, 0);
+                          const net = group.totalPrice;
+                          const discount = Math.max(0, Math.round((gross - net) * 100) / 100);
+                          const unitPrice = resolveComboGroupUnitPrice(group);
+                          return (
+                            <div key={`summary-${group.key}`} className="bg-yellow-50/60 dark:bg-yellow-900/20">
+                              <div className="grid grid-cols-12 gap-2 px-3 py-2 text-sm">
+                                <div className="col-span-5 flex items-center gap-2">
+                                  <Badge
+                                    variant="outline"
+                                    className={group.comboType === "kit" ? "border-emerald-300 text-emerald-700 bg-emerald-50" : "border-blue-300 text-blue-700 bg-blue-50"}
+                                  >
+                                    {group.comboType === "kit" ? "Kit" : "Combo"}
+                                  </Badge>
+                                  <div className="flex flex-col">
+                                    <span className="font-semibold text-foreground">{comboName}</span>
+                                    <span className="text-[11px] font-mono text-muted-foreground">{comboCode} · Q{unitPrice.toFixed(2)}</span>
+                                  </div>
+                                </div>
+                                <div className="col-span-1 text-right text-muted-foreground">Cant: {quantity}</div>
+                                <div className="col-span-2 text-right text-muted-foreground">Bruto: Q{gross.toFixed(2)}</div>
+                                <div className="col-span-2 text-right text-muted-foreground">Desc: Q{discount.toFixed(2)}</div>
+                                <div className="col-span-2 text-right font-semibold text-foreground">Q{net.toFixed(2)}</div>
+                              </div>
+                              {group.items.map((line) => {
+                                const detailCode = pickReferenceCode(
+                                  line.codigoOferta,
+                                  line.ofertaCodigo,
+                                  line.comboCode,
+                                  resolvedComboCode
+                                ) ?? comboCode;
+                                const detailProduct = productMap.get(String(line.productoId));
+                                const detailName = line.descripcion || detailProduct?.descripcion || String(line.productoId);
+                                return (
+                                  <div
+                                    key={`${line.id}-summary`}
+                                    className="grid grid-cols-12 gap-2 px-3 py-1 text-xs text-muted-foreground"
+                                  >
+                                    <div className="col-span-5 pl-6 flex flex-col">
+                                      <span className="font-medium text-muted-foreground/90">{detailName}</span>
+                                      <span className="font-mono text-[11px] text-muted-foreground/70">{detailCode} · {line.productoId}</span>
+                                    </div>
+                                    <div className="col-span-1 text-right">Cant: {line.cantidad}</div>
+                                    <div className="col-span-2" />
+                                    <div className="col-span-2" />
+                                    <div className="col-span-2" />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+
+                        {normalItems.map((it) => {
                           const bruto = it.subtotalSinDescuento ?? it.subtotal ?? it.cantidad * it.precioUnitario;
                           const descuento = it.descuentoLinea ?? 0;
                           const neto = it.subtotal ?? bruto;
@@ -1550,12 +2069,12 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                                     {badgeLabel}
                                   </Badge>
                                 ) : null}
-                                <span className="truncate">{it.descripcion}</span>
+                                <span className="font-xs">{it.descripcion}</span>
                               </div>
-                              <div className="col-span-2 text-right text-muted-foreground">Cant: {it.cantidad}</div>
+                              <div className="col-span-1 text-right text-muted-foreground">Cant: {it.cantidad}</div>
                               <div className="col-span-2 text-right text-muted-foreground">Bruto: Q{bruto.toFixed(2)}</div>
                               <div className="col-span-2 text-right text-muted-foreground">Desc: Q{descuento.toFixed(2)}</div>
-                              <div className="col-span-1 text-right font-semibold text-foreground">Q{neto.toFixed(2)}</div>
+                              <div className="col-span-2 text-right font-semibold text-foreground">Q{neto.toFixed(2)}</div>
                             </div>
                           );
                         })}
@@ -1598,6 +2117,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         onOpenChange={setOpenProducts}
         onPick={handlePickProducts}
         existingItems={existingItems}
+        customer={customer}
+        priceLists={priceLists}
+        companyId={companyCode}
         />
 
         <ComboSelectionModal
@@ -1606,164 +2128,267 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         onPick={handlePickComboItems}
         disabled={!canUseCombos}
         customer={customer}
-        existingItems={existingItems}
+          existingItems={existingItems}
+          products={productosAll}
         />
 
+        {activePackOffer && (
+          <OfferPackConfigurator
+            open={!!activePackOffer}
+            pack={activePackOffer}
+            onOpenChange={(v) => {
+              if (!v) setActivePackOffer(null);
+            }}
+            onConfirm={(items) => {
+              handlePickComboItems(items);
+              setActivePackOffer(null);
+            }}
+            productMap={productMap}
+          />
+        )}
+
       {/* Modal de ofertas */}
-      {offersOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto py-8 px-4">
-          <div className="bg-white dark:bg-neutral-900 rounded-xl shadow-lg p-6 w-full max-w-4xl max-h-[88vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <div className="font-semibold text-lg">Ofertas aplicables</div>
-              <div className="font-semibold text-sm">Asegurate de haber finalizado tu pedido para aplicar las ofertas</div>
-              <div className="flex items-center gap-2">
-                <Button variant="destructive" onClick={() => setOffersOpen(false)}>Cerrar</Button>
+      {canUseDOM && offersOpen
+        ? createPortal(
+          <div
+            className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/40 py-8 px-4 pointer-events-auto"
+            style={{ touchAction: "pan-y" }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setOffersOpen(false);
+            }}
+          >
+            <div
+              className="bg-white dark:bg-neutral-900 rounded-xl shadow-lg w-full max-w-4xl h-[88vh] min-h-0 flex flex-col overflow-hidden"
+              style={{ WebkitOverflowScrolling: "touch" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+           {/* HEADER */}
+            <div className="flex-none mb-4">
+              <div className="flex items-center justify-between mb-4">
+                <div className="font-semibold text-lg">Ofertas aplicables</div>
+                <div className="font-semibold text-sm">Asegurate de haber finalizado el pedido para aplicar las ofertas</div>
+                <div className="flex items-center gap-2">
+                  <Button variant="destructive" onClick={() => setOffersOpen(false)}>Cerrar</Button>
+                </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 mb-4">
-              <Button
-                variant={offersTab === "discounts" ? "default" : "ghost"}
-                onClick={() => { setOffersTab("discounts"); setExpandedOfferId(null); setOffersTypeFilter("discount"); }}
-              >
-                Descuentos ({discountOffers.length})
-              </Button>
-              <Button
-                variant={offersTab === "bonuses" ? "default" : "ghost"}
-                onClick={() => { setOffersTab("bonuses"); setExpandedOfferId(null); setOffersTypeFilter("bonus"); }}
-              >
-                Bonificaciones ({bonusOffers.length})
-              </Button>
+            {/* TABS */}
+            <div className="flex-none mb-4">
+              <div className="flex items-center gap-2 mb-4">
+                <Button
+                  variant={offersTab === "discounts" ? "default" : "ghost"}
+                  onClick={() => { setOffersTab("discounts"); setExpandedOfferId(null); setOffersTypeFilter("discount"); }}
+                >
+                  Descuentos ({discountOffers.length})
+                </Button>
+                <Button
+                  variant={offersTab === "bonuses" ? "default" : "ghost"}
+                  onClick={() => { setOffersTab("bonuses"); setExpandedOfferId(null); setOffersTypeFilter("bonus"); }}
+                >
+                  Bonificaciones ({bonusOffers.length})
+                </Button>
+                <Button
+                  variant={offersTab === "packs" ? "default" : "ghost"}
+                  onClick={() => { setOffersTab("packs"); setExpandedOfferId(null); setOffersTypeFilter("all"); }}
+                >
+                  Combos / Kits ({packOffers.length})
+                </Button>
+              </div>
             </div>
 
-            {filteredOffersByTab.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                {offersTab === "discounts" ? "No hay descuentos aplicables para este pedido." : "No hay bonificaciones aplicables para este pedido."}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {filteredOffersByTab.map((app, idx) => {
-                  const oid = app.offer.id || app.offer.serverId || `offer-${idx}`;
-                  const isBonus = app.offer.type === "bonus";
-                  const discountConfig = app.offer.discount || (app.offer as any).discountConfig || {};
-                  const tiers = parseTiers(discountConfig);
-                  const applyPerLine = tiers.length > 0 ? true : normalizeBool((discountConfig as any).perLine ?? (discountConfig as any).byLine ?? (discountConfig as any).applyPerLine ?? (discountConfig as any).aplicarPorLinea ?? (discountConfig as any).porLinea, false);
-                  const quantities = (app.applicableItems || []).map((it) => Number(it.cantidad || 0));
-                  const metric = applyPerLine
-                    ? (quantities.length ? Math.max(...quantities) : 0)
-                    : quantities.reduce((acc, qty) => acc + qty, 0);
-                  const matchedTier = pickTierForQty(tiers, metric);
-                  const bonusQty = app.potentialBonusQty || 0;
-                  const typeLabel = isBonus ? "Bonificación" : "Descuento";
-
-                  return (
-                    <div
-                      key={oid}
-                      className={`border rounded p-3 ${appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'border-green-400 bg-green-50 dark:bg-green-900/10' : ''}`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline" className={isBonus ? 'border-amber-400 text-amber-700 bg-amber-50' : 'border-blue-300 text-blue-700 bg-blue-50'}>
-                              {typeLabel}
-                            </Badge>
-                            <div className="font-medium">{app.offer.name}</div>
+  {/* 👉 ESTA ES LA ÚNICA ZONA CON SCROLL */}
+  <div
+    className="flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1"
+    style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
+  >
+              {offersTab === "packs" ? (
+                packOffers.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    {customer
+                      ? "No hay combos o kits aplicables para este cliente."
+                      : "Selecciona un cliente para ver combos y kits disponibles."}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {packOffers.map((pack) => {
+                      const totalUnits = pack.packConfig.cantidadTotalProductos;
+                      const fixedUnits = (pack.packConfig.itemsFijos ?? []).reduce((acc, it) => acc + Number(it.unidades ?? 0), 0);
+                      const variableUnits = Math.max(0, totalUnits - fixedUnits);
+                      const vigencia = `${pack.offer.dates?.validFrom ?? "N/D"} → ${pack.offer.dates?.validTo ?? "N/D"}`;
+                      return (
+                        <div key={pack.idt} className="border rounded p-3 bg-amber-50/40 dark:bg-amber-900/10">
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="space-y-1">
+                                <Badge variant="outline" className="border-amber-400 text-amber-800 bg-amber-50">
+                                  {pack._type === "combo" ? "Combo" : "Kit"}
+                                </Badge>
+                                <div className="font-semibold text-foreground">{pack.descripcion}</div>
+                                {pack.offer.description && (
+                                  <div className="text-xs text-muted-foreground">{pack.offer.description}</div>
+                                )}
+                              </div>
+                              <div className="text-right">
+                                <div className="text-sm font-semibold text-amber-700">Q{(pack.price ?? pack.packConfig.precioFijo).toFixed(2)}</div>
+                                <div className="text-xs text-muted-foreground">Precio fijo por pack</div>
+                              </div>
+                            </div>
+                            <div className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+                              <span>{totalUnits} productos por pack</span>
+                              <span>{fixedUnits} fijos</span>
+                              {variableUnits > 0 && <span>{variableUnits} variables</span>}
+                              <span>Vigencia: {vigencia}</span>
+                            </div>
+                            <div className="text-xs text-muted-foreground line-clamp-2">
+                              {(pack.items || []).slice(0, 4).map((it) => it.descripcion).join(", ")}
+                              {(pack.items || []).length > 4 ? "…" : ""}
+                            </div>
+                            <div className="flex justify-end">
+                              <Button
+                                variant="secondary"
+                                onClick={() => setActivePackOffer(pack)}
+                              >
+                                Configurar
+                              </Button>
+                            </div>
                           </div>
-                          <div className="text-xs text-muted-foreground">{app.offer.description}</div>
-                          {isBonus ? (
-                            <div className="text-sm mt-1 text-emerald-700">
-                              Bonificación estimada: {bonusQty} unds
-                            </div>
-                          ) : (
-                            <div className="text-sm mt-1 text-emerald-700">
-                              Descuento aplicable ahora: Q{(app.potentialDiscount || 0).toFixed(2)}
-                            </div>
-                          )}
-                          {!isBonus && tiers.length > 0 && (
-                            <div className="text-xs text-slate-600 mt-1">
-                              Escala alcanzada ({applyPerLine ? 'por línea' : 'por mezcla'}): {describeTier(matchedTier)} {metric ? `(cantidad usada: ${metric})` : ''}
-                            </div>
-                          )}
-                          {isBonus && app.bonusApplications?.length ? (
-                            <div className="text-xs text-slate-600 mt-1">
-                              Modo: {app.bonusApplications[0].mode === 'por_linea' ? 'Por línea' : 'Acumulado'} · Aplicaciones: {app.bonusApplications.length}
-                            </div>
-                          ) : null}
                         </div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            onClick={() => {
-                              handleApplyOffer(app);
-                              setOffersOpen(true); // mantener el modal abierto tras aplicar
-                            }}
-                            variant={appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'secondary' : 'default'}
-                          >
-                            {appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'Quitar' : 'Aplicar'}
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() => setExpandedOfferId((prev) => (prev === oid ? null : oid))}
-                          >
-                            {expandedOfferId === oid ? 'Ocultar' : 'Detalles'}
-                          </Button>
-                        </div>
-                      </div>
+                      );
+                    })}
+                  </div>
+                )
+              ) : filteredOffersByTab.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  {offersTab === "discounts" ? "No hay descuentos aplicables para este pedido." : "No hay bonificaciones aplicables para este pedido."}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {filteredOffersByTab.map((app, idx) => {
+                    const oid = app.offer.id || app.offer.serverId || `offer-${idx}`;
+                    const isBonus = app.offer.type === "bonus";
+                    const discountConfig = app.offer.discount || (app.offer as any).discountConfig || {};
+                    const tiers = parseTiers(discountConfig);
+                    const applyPerLine = tiers.length > 0 ? true : normalizeBool((discountConfig as any).perLine ?? (discountConfig as any).byLine ?? (discountConfig as any).applyPerLine ?? (discountConfig as any).aplicarPorLinea ?? (discountConfig as any).porLinea, false);
+                    const quantities = (app.applicableItems || []).map((it) => Number(it.cantidad || 0));
+                    const metric = applyPerLine
+                      ? (quantities.length ? Math.max(...quantities) : 0)
+                      : quantities.reduce((acc, qty) => acc + qty, 0);
+                    const matchedTier = pickTierForQty(tiers, metric);
+                    const bonusQty = app.potentialBonusQty || 0;
+                    const typeLabel = isBonus ? "Bonificación" : "Descuento";
 
-                      {expandedOfferId === oid && (
-                        <div className="mt-3 rounded bg-slate-50 border border-slate-200 p-3 text-xs space-y-2">
-                          <div><span className="font-semibold">Vigencia:</span> {app.offer.dates?.validFrom} → {app.offer.dates?.validTo}</div>
-                          {!isBonus && (
-                            <div><span className="font-semibold">Modo:</span> {applyPerLine ? 'Por línea (cada producto evalúa su escala)' : 'Por mezcla de cantidades'}</div>
-                          )}
-                          {isBonus && app.bonusApplications?.length ? (
-                            <div>
-                              <span className="font-semibold">Bonificación:</span>
-                              <ul className="list-disc list-inside mt-1 space-y-1">
-                                {app.bonusApplications.map((b, i) => (
-                                  <li key={i}>+{b.bonusQty} unds · {b.mode === 'por_linea' ? 'por línea' : 'acumulado'}{b.resolvedProductId ? ` → SKU ${b.resolvedProductId}` : ' (requiere selección)'}
-                                  </li>
-                                ))}
-                              </ul>
+                    return (
+                      <div
+                        key={oid}
+                        className={`border rounded p-3 ${appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'border-green-400 bg-green-50 dark:bg-green-900/10' : ''}`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className={isBonus ? 'border-amber-400 text-amber-700 bg-amber-50' : 'border-blue-300 text-blue-700 bg-blue-50'}>
+                                {typeLabel}
+                              </Badge>
+                              <div className="font-medium">{app.offer.name}</div>
                             </div>
-                          ) : null}
-                          {!isBonus && tiers.length > 0 && (
-                            <div>
-                              <span className="font-semibold">Escalas:</span>
-                              <ul className="list-disc list-inside mt-1 space-y-1">
-                                {tiers.map((t: any, i: number) => (
-                                  <li key={i}>
-                                    {describeTier(t)}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                          {app.offer.scope && (
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                              {app.offer.scope.codigosProducto?.length ? (
-                                <div><span className="font-semibold">Productos:</span> {app.offer.scope.codigosProducto.join(', ')}</div>
-                              ) : null}
-                              {app.offer.scope.canales?.length ? (
-                                <div><span className="font-semibold">Canales:</span> {app.offer.scope.canales.join(', ')}</div>
-                              ) : null}
-                              {app.offer.scope.subCanales?.length ? (
-                                <div><span className="font-semibold">Sub-canales:</span> {app.offer.scope.subCanales.join(', ')}</div>
-                              ) : null}
-                              {app.offer.scope.codigosCliente?.length ? (
-                                <div><span className="font-semibold">Clientes:</span> {app.offer.scope.codigosCliente.join(', ')}</div>
-                              ) : null}
-                            </div>
-                          )}
+                            <div className="text-xs text-muted-foreground">{app.offer.description}</div>
+                            {isBonus ? (
+                              <div className="text-sm mt-1 text-emerald-700">
+                                Bonificación estimada: {bonusQty} unds
+                              </div>
+                            ) : (
+                              <div className="text-sm mt-1 text-emerald-700">
+                                Descuento aplicable ahora: Q{(app.potentialDiscount || 0).toFixed(2)}
+                              </div>
+                            )}
+                            {!isBonus && tiers.length > 0 && (
+                              <div className="text-xs text-slate-600 mt-1">
+                                Escala alcanzada ({applyPerLine ? 'por línea' : 'por mezcla'}): {describeTier(matchedTier)} {metric ? `(cantidad usada: ${metric})` : ''}
+                              </div>
+                            )}
+                            {isBonus && app.bonusApplications?.length ? (
+                              <div className="text-xs text-slate-600 mt-1">
+                                Modo: {app.bonusApplications[0].mode === 'por_linea' ? 'Por línea' : 'Acumulado'} · Aplicaciones: {app.bonusApplications.length}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              onClick={() => {
+                                handleApplyOffer(app);
+                                setOffersOpen(true); // mantener el modal abierto tras aplicar
+                              }}
+                              variant={appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'secondary' : 'default'}
+                            >
+                              {appliedOffers.some((o) => (o.offer.id || o.offer.serverId) === (app.offer.id || app.offer.serverId)) ? 'Quitar' : 'Aplicar'}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => setExpandedOfferId((prev) => (prev === oid ? null : oid))}
+                            >
+                              {expandedOfferId === oid ? 'Ocultar' : 'Detalles'}
+                            </Button>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+
+                        {expandedOfferId === oid && (
+                          <div className="mt-3 rounded bg-slate-50 border border-slate-200 p-3 text-xs space-y-2">
+                            <div><span className="font-semibold">Vigencia:</span> {app.offer.dates?.validFrom} → {app.offer.dates?.validTo}</div>
+                            {!isBonus && (
+                              <div><span className="font-semibold">Modo:</span> {applyPerLine ? 'Por línea (cada producto evalúa su escala)' : 'Por mezcla de cantidades'}</div>
+                            )}
+                            {isBonus && app.bonusApplications?.length ? (
+                              <div>
+                                <span className="font-semibold">Bonificación:</span>
+                                <ul className="list-disc list-inside mt-1 space-y-1">
+                                  {app.bonusApplications.map((b, i) => (
+                                    <li key={i}>+{b.bonusQty} unds · {b.mode === 'por_linea' ? 'por línea' : 'acumulado'}{b.resolvedProductId ? ` → SKU ${b.resolvedProductId}` : ' (requiere selección)'}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                            {!isBonus && tiers.length > 0 && (
+                              <div>
+                                <span className="font-semibold">Escalas:</span>
+                                <ul className="list-disc list-inside mt-1 space-y-1">
+                                  {tiers.map((t: any, i: number) => (
+                                    <li key={i}>
+                                      {describeTier(t)}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {app.offer.scope && (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {app.offer.scope.codigosProducto?.length ? (
+                                  <div><span className="font-semibold">Productos:</span> {app.offer.scope.codigosProducto.join(', ')}</div>
+                                ) : null}
+                                {app.offer.scope.canales?.length ? (
+                                  <div><span className="font-semibold">Canales:</span> {app.offer.scope.canales.join(', ')}</div>
+                                ) : null}
+                                {app.offer.scope.subCanales?.length ? (
+                                  <div><span className="font-semibold">Sub-canales:</span> {app.offer.scope.subCanales.join(', ')}</div>
+                                ) : null}
+                                {app.offer.scope.codigosCliente?.length ? (
+                                  <div><span className="font-semibold">Clientes:</span> {app.offer.scope.codigosCliente.join(', ')}</div>
+                                ) : null}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            </div>
+          </div>,
+          document.body,
+        )
+        : null}
 
 {showChangeCustomerModal && pendingCustomerChange && (
   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -1812,7 +2437,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
             onClose();
           }}
         >
-          No, mejor descartar
+          No, descartar
         </Button>
         <Button
           className="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow"
@@ -1821,194 +2446,217 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
             onClose();
           }}
         >
-          Sí, continuar después
+          Sí,
         </Button>
       </div>
     </div>
   </div>
 )}
 
-{showBonusPicker && pendingBonus && (
-  <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto py-6 px-3">
-    <div className="bg-white dark:bg-neutral-900 rounded-xl shadow-lg w-full max-w-3xl max-h-[55vh] min-h-[35vh] flex flex-col overflow-hidden p-6">
-      <div className="flex items-start justify-between mb-3 gap-4 flex-none sticky top-0 bg-white dark:bg-neutral-900 z-10 pb-2">
-        <div>
-          <div className="font-semibold text-lg">Selecciona productos a bonificar</div>
-          <div className="text-sm text-muted-foreground">Distribuye la cantidad bonificada total entre los SKUs del alcance.</div>
-        </div>
-        <div className="text-sm font-semibold text-blue-700 dark:text-blue-300 whitespace-nowrap">
-          Total a bonificar: {totalBonusToAssign} uds
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto pr-1 min-h-0 pb-6">
-        {bonusOptions.length === 0 ? (
-          <div className="text-sm text-red-600">No se encontraron productos para bonificar en el alcance definido.</div>
-        ) : (
-          <>
-            <div className="space-y-2 mb-3">
-              <div className="flex flex-wrap gap-2">
-                {bonusProviders.map((prov) => (
-                  <button
-                    key={prov.id}
-                    onClick={() => {
-                      const next = bonusProviderFilter === prov.id ? null : prov.id;
-                      setBonusProviderFilter(next);
-                      setBonusLineFilter(null);
-                    }}
-                    className={`px-3 py-1.5 rounded-full text-sm border transition ${bonusProviderFilter === prov.id ? 'bg-primary text-primary-foreground border-primary shadow-sm' : 'bg-muted text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground'}`}
-                  >
-                    {prov.label} {typeof prov.count === 'number' ? `(${prov.count})` : ''}
-                  </button>
-                ))}
-              </div>
-              {bonusProviderFilter && bonusLines.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {bonusLines.map((line) => (
-                    <button
-                      key={line.id}
-                      onClick={() => setBonusLineFilter(bonusLineFilter === line.id ? null : line.id)}
-                      className={`px-3 py-1.5 rounded-full text-sm border transition ${bonusLineFilter === line.id ? 'bg-yellow-100 text-yellow-800 border-yellow-300' : 'bg-muted text-muted-foreground border-border hover:bg-accent hover:text-accent-foreground'}`}
-                    >
-                      {line.label} {typeof line.count === 'number' ? `(${line.count})` : ''}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input
-                  className="pl-9"
-                  placeholder="Buscar por SKU o descripción"
-                  value={bonusSearch}
-                  onChange={(e) => setBonusSearch(e.target.value)}
-                />
-              </div>
-            </div>
-
-            {filteredBonusOptions.length === 0 ? (
-              <div className="text-sm text-muted-foreground">Sin coincidencias para los filtros seleccionados.</div>
-            ) : (
-              <div className="space-y-2 pb-2">
-                {filteredBonusOptions.map((p) => {
-                  const current = Number(bonusDraftQuantities[p.codigoProducto] || 0);
-                  return (
-                    <div key={p.codigoProducto} className="flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2">
-                      <div className="flex-1">
-                        <div className="font-medium text-sm text-foreground">{p.descripcion || p.codigoProducto}</div>
-                        <div className="text-xs text-muted-foreground">SKU {p.codigoProducto} · Precio: Q{(p.precio ?? 0).toFixed(2)}</div>
-                        <div className="text-[11px] text-muted-foreground flex gap-2 flex-wrap">
-                          {p.proveedor ? <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">{p.proveedor}</span> : null}
-                          {p.filtroVenta ? <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">{p.filtroVenta}</span> : null}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          size="icon"
-                          variant="outline"
-                          onClick={() => {
-                            updateBonusDraftQuantity(p.codigoProducto, current - 1);
-                          }}
-                        >
-                          -
-                        </Button>
-                        <Input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          className="w-16 text-center"
-                          value={Number.isFinite(current) ? current : 0}
-                          onChange={(e) => {
-                            const nextVal = Number(e.target.value);
-                            updateBonusDraftQuantity(p.codigoProducto, isNaN(nextVal) ? 0 : nextVal);
-                          }}
-                          onBlur={(e) => {
-                            const nextVal = Number(e.target.value);
-                            updateBonusDraftQuantity(p.codigoProducto, isNaN(nextVal) ? 0 : nextVal);
-                          }}
-                        />
-                        <Button
-                          size="icon"
-                          variant="outline"
-                          onClick={() => {
-                            updateBonusDraftQuantity(p.codigoProducto, current + 1);
-                          }}
-                        >
-                          +
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      <div className="flex justify-between items-center py-3 border-t mt-3 text-sm text-muted-foreground flex-none sticky bottom-16 bg-white dark:bg-neutral-900">
-        <span>Asigna las unidades hasta completar el total bonificado.</span>
-        <span className="font-medium text-foreground">
-          Asignado: {assignedBonusQty} uds · Pendiente: {Math.max(totalBonusToAssign - assignedBonusQty, 0)} uds
-        </span>
-      </div>
-
-      <div className="flex justify-end gap-2 flex-none sticky bottom-4 bg-white dark:bg-neutral-900 pt-3 pb-1">
-        <Button variant="secondary" onClick={() => { setShowBonusPicker(false); setPendingBonus(null); }}>
-          Cancelar
-        </Button>
-        <Button
-          disabled={bonusOptions.length === 0 || assignedBonusQty === 0 || assignedBonusQty !== totalBonusToAssign}
-          onClick={() => {
-            if (!pendingBonus) return;
-            const promoId = pendingBonus.app.offer.id || pendingBonus.app.offer.serverId || pendingBonus.app.offer.name;
-            const applications = pendingBonus.applications;
-            const totalBonus = applications.reduce((acc, a) => acc + a.bonusQty, 0);
-            const quantities = pendingBonus.draftQuantities || {};
-            const assignedTotal = assignedBonusQty;
-            if (assignedTotal === 0) return;
-
-            const bonusLines: OrderItem[] = [];
-            let remaining = totalBonus;
-            Object.entries(quantities).forEach(([pid, qtyRaw]) => {
-              const qty = Math.min(Number(qtyRaw || 0), Math.max(remaining, 0));
-              if (!qty) return;
-              const prod = productosAll.find((p) => String(p.codigoProducto) === String(pid));
-              const price = prod?.precio ?? 0;
-              const bruto = Math.round(price * qty * 100) / 100;
-              remaining -= qty;
-              bonusLines.push({
-                id: `${promoId}-bonus-${pid}-${Date.now()}`,
-                productoId: pid,
-                descripcion: prod?.descripcion || `Descuento por bonificación – ${pendingBonus.app.offer.name}`,
-                cantidad: qty,
-                precioUnitario: price,
-                subtotalSinDescuento: bruto,
-                subtotal: 0,
-                descuentoLinea: bruto,
-                total: 0,
-                esBonificacion: true,
-                promoBonificacionId: promoId,
-                ofertaIdAplicada: promoId,
-                ofertaNombre: pendingBonus.app.offer.name,
-                tipoOferta: "bonus",
-              });
-            });
-
-            if (bonusLines.length) {
-              setItems((prev) => [...prev, ...bonusLines]);
-              setAppliedOffers((prev) => [...prev, { ...pendingBonus.app, potentialDiscount: 0, potentialBonusQty: bonusLines.reduce((acc, b) => acc + b.cantidad, 0) }]);
-            }
+{typeof document !== "undefined" && showBonusPicker && pendingBonus
+  ? createPortal(
+      <div
+        className="fixed inset-0 z-[100002] flex items-start justify-center bg-black/40 py-6 px-3 pointer-events-auto overflow-y-auto overscroll-contain"
+        style={{ touchAction: "pan-y", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
             setShowBonusPicker(false);
             setPendingBonus(null);
-          }}
+          }
+        }}
+      >
+        <div
+          className="bg-white dark:bg-neutral-900 rounded-xl shadow-lg w-full max-w-3xl max-h-[85vh] min-h-[45vh] flex flex-col min-h-0 p-6 pointer-events-auto overflow-y-auto md:overflow-hidden"
+          style={{ maxHeight: "calc(100vh - 2.5rem)", WebkitOverflowScrolling: "touch" }}
+          onClick={(e) => e.stopPropagation()}
         >
-          Aplicar bonificación
-        </Button>
-      </div>
-    </div>
-  </div>
-)}
+          <div className="flex items-start justify-between mb-3 gap-4 flex-none sticky top-0 bg-white dark:bg-neutral-900 z-10 pb-2">
+            <div>
+              <div className="font-semibold text-lg">Bonificar</div>
+            </div>
+            <div className="text-sm font-semibold text-blue-700 dark:text-blue-300 whitespace-nowrap">
+              Total a bonificar: {totalBonusToAssign} uds
+            </div>
+          </div>
+
+          <div
+            className="flex-1 overflow-y-auto pr-1 min-h-0 pb-6 touch-pan-y"
+            style={{
+              touchAction: "pan-y",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehavior: "contain",
+              maxHeight: "max(260px, calc(100vh - 18rem))",
+            }}
+          >
+            {bonusOptions.length === 0 ? (
+              <div className="text-sm text-red-600">No se encontraron productos para bonificar en el alcance definido.</div>
+            ) : (
+              <>
+                <div className="space-y-2 mb-3">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                    <Input
+                      className="pl-9"
+                      placeholder="Buscar por SKU o descripción"
+                      value={bonusSearch}
+                      onChange={(e) => setBonusSearch(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {filteredBonusOptions.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">Sin coincidencias para los filtros seleccionados.</div>
+                ) : (
+                  <div className="space-y-2 pb-2">
+                    {filteredBonusOptions.map((p) => {
+                      const current = Number(bonusDraftQuantities[p.codigoProducto] || 0);
+                      return (
+                        <div key={p.codigoProducto} className="flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2">
+                          <div className="flex-1">
+                            <div className="font-medium text-sm text-foreground">{p.descripcion || p.codigoProducto}</div>
+                            <div className="text-xs text-muted-foreground">SKU {p.codigoProducto} </div>
+                            <div className="text-[11px] text-muted-foreground flex gap-2 flex-wrap">
+                              {p.proveedor ? <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">{p.proveedor}</span> : null}
+                              {p.filtroVenta ? <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">{p.filtroVenta}</span> : null}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => {
+                                  updateBonusDraftQuantity(p.codigoProducto, current - 1);
+                                }}
+                              >
+                                -
+                              </Button>
+                              <Input
+                                type="number"
+                                inputMode="numeric"
+                                min={0}
+                                className="w-16 text-center"
+                                value={Number.isFinite(current) ? current : 0}
+                                onChange={(e) => {
+                                  const nextVal = Number(e.target.value);
+                                  updateBonusDraftQuantity(p.codigoProducto, isNaN(nextVal) ? 0 : nextVal);
+                                }}
+                                onBlur={(e) => {
+                                  const nextVal = Number(e.target.value);
+                                  updateBonusDraftQuantity(p.codigoProducto, isNaN(nextVal) ? 0 : nextVal);
+                                }}
+                              />
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => {
+                                  updateBonusDraftQuantity(p.codigoProducto, current + 1);
+                                }}
+                              >
+                                +
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="flex justify-between items-center py-3 border-t mt-3 text-sm text-muted-foreground flex-none sticky bottom-16 bg-white dark:bg-neutral-900">
+            <span>Asigna las unidades hasta completar el total bonificado.</span>
+            <span className="font-medium text-foreground">
+              Asignado: {assignedBonusQty} uds · Pendiente: {Math.max(totalBonusToAssign - assignedBonusQty, 0)} uds
+            </span>
+          </div>
+
+          <div className="flex justify-end gap-2 flex-none sticky bottom-4 bg-white dark:bg-neutral-900 pt-3 pb-1">
+            <Button variant="secondary" onClick={() => { setShowBonusPicker(false); setPendingBonus(null); }}>
+              Cancelar
+            </Button>
+            <Button
+              disabled={bonusOptions.length === 0 || assignedBonusQty === 0 || assignedBonusQty !== totalBonusToAssign}
+              onClick={() => {
+                if (!pendingBonus) return;
+                const promoId = pendingBonus.app.offer.id || pendingBonus.app.offer.serverId || pendingBonus.app.offer.name;
+                const applications = pendingBonus.applications;
+                const totalBonus = applications.reduce((acc, a) => acc + a.bonusQty, 0);
+                const quantities = pendingBonus.draftQuantities || {};
+                const assignedTotal = assignedBonusQty;
+                if (assignedTotal === 0) return;
+
+                const bonusLines: OrderItem[] = [];
+                let remaining = totalBonus;
+                Object.entries(quantities).forEach(([pid, qtyRaw]) => {
+                  const qty = Math.min(Number(qtyRaw || 0), Math.max(remaining, 0));
+                  if (!qty) return;
+                  const prod = productosAll.find((p) => String(p.codigoProducto) === String(pid));
+                  const price = prod?.precio ?? 0;
+                  const bruto = Math.round(price * qty * 100) / 100;
+                  const codigoProveedor = prod?.codigoProveedor != null ? String(prod.codigoProveedor) : undefined;
+                  const nombreProveedor = prod?.proveedor ?? undefined;
+                  const codigoLinea = prod?.codigoLinea ?? prod?.codigoFiltroVenta ?? (prod as any)?.lineaVenta ?? undefined;
+                  const nombreLinea = prod?.linea ?? prod?.filtroVenta ?? undefined;
+                  const offerCode = pickReferenceCode(
+                    pendingBonus.app.offer.codigoOferta,
+                    pendingBonus.app.offer.referenceCode,
+                    (pendingBonus.app.offer as any)?.codigoReferencia,
+                    (pendingBonus.app.offer as any)?.codigoOferta,
+                    pendingBonus.app.offer.id,
+                    pendingBonus.app.offer.serverId
+                  );
+                  const relatedApplications = applications.filter((ap) => {
+                    if (!ap.resolvedProductId) return true;
+                    return String(ap.resolvedProductId) === String(pid);
+                  });
+                  const sourceIds = relatedApplications.flatMap((ap) => (ap.sourceItemIds || []).map((sid) => String(sid)));
+                  const resolvedParentId = sourceIds
+                    .map((sid) => items.find((it) => it.id === sid || String(it.productoId) === sid)?.id)
+                    .find((val): val is string => Boolean(val));
+                  remaining -= qty;
+                  bonusLines.push({
+                    id: `${promoId}-bonus-${pid}-${Date.now()}`,
+                    productoId: pid,
+                    descripcion: prod?.descripcion || `Descuento por bonificación – ${pendingBonus.app.offer.name}`,
+                    cantidad: qty,
+                    precioUnitario: price,
+                    subtotalSinDescuento: bruto,
+                    subtotal: 0,
+                    descuentoLinea: bruto,
+                    total: 0,
+                    esBonificacion: true,
+                    promoBonificacionId: promoId,
+                    ofertaIdAplicada: promoId,
+                    ofertaNombre: pendingBonus.app.offer.name,
+                    tipoOferta: "bonus",
+                    ofertaCodigo: offerCode ?? null,
+                    codigoOferta: offerCode ?? null,
+                    codigoProveedor: codigoProveedor ?? null,
+                    nombreProveedor: nombreProveedor ?? null,
+                    codigoLinea: codigoLinea ?? null,
+                    nombreLinea: nombreLinea ?? null,
+                    parentItemId: resolvedParentId ?? null,
+                    relatedItemIds: sourceIds.length ? sourceIds : undefined,
+                  });
+                });
+
+                if (bonusLines.length) {
+                  setItems((prev) => [...prev, ...bonusLines]);
+                  setAppliedOffers((prev) => [...prev, { ...pendingBonus.app, potentialDiscount: 0, potentialBonusQty: bonusLines.reduce((acc, b) => acc + b.cantidad, 0) }]);
+                }
+                setShowBonusPicker(false);
+                setPendingBonus(null);
+              }}
+            >
+              Aplicar bonificación
+            </Button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    )
+  : null}
 
 
     </div>
