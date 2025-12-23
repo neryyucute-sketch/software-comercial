@@ -16,9 +16,8 @@ const nextConfig = {
     allowedDevOrigins: [URL_API],
   },
 
-  // 👉 Para soportar export estático + SW cacheando páginas
-  output: "export", // o "export" si quieres generar archivos estáticos 100%
-
+  // En server runtime no usamos export estático; Next.js sirve con "next start"
+  // Si en algún entorno se requiere export estático, habilitar "output: 'export'" explícitamente allí.
   // Headers no se aplican en export estático; configúralos en CDN/servidor si los necesitas
 };
 

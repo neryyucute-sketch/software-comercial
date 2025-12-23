@@ -1,4 +1,3 @@
-# Dockerfile para Next.js app (producción)
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
@@ -14,8 +13,10 @@ COPY --from=builder /app/pnpm-lock.yaml ./
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/next.config.js ./
-COPY --from=builder /app/.env.local ./.env.local
 COPY --from=builder /app/node_modules ./node_modules
+
+# Habilita pnpm en el runtime (corepack viene con Node 20)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 EXPOSE 3000
 CMD ["pnpm", "start"]
