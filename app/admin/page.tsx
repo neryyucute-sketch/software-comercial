@@ -37,8 +37,8 @@ export default function AdminPage() {
         </div>
         <div className="flex items-center gap-4">
           <div className="text-right">
-            <p className="font-medium">{user?.username}</p>
-            <p className="text-sm text-muted-foreground">{user?.role?.name}</p>
+            <p className="font-medium">{user?.usuario}</p>
+            <p className="text-sm text-muted-foreground">{user?.rol}</p>
           </div>
           <Button variant="outline" onClick={logout}>
             <LogOut className="h-4 w-4 mr-2" />
