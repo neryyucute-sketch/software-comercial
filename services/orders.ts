@@ -32,7 +32,7 @@ export async function syncOrderToServer(order: Order): Promise<{ ok: boolean; se
     // Mapea si tu backend requiere otra forma
     const payload = {
       localId: order.localId,
-      customerId: order.customerId,
+      customerId: order.codigoCliente,
       discount: Math.max(0, Math.min(100, order.discount ?? 0)), // 0-100%
       total: order.total,
       createdAt: order.createdAt,
@@ -82,7 +82,7 @@ export async function syncOrderToServer(order: Order): Promise<{ ok: boolean; se
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        "Idempotency-Key": order.localId,
+        ...(order.localId ? { "Idempotency-Key": order.localId } : {}),
       },
       body: JSON.stringify(payload),
       signal: controller.signal,

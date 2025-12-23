@@ -32,13 +32,21 @@ export default function StatsPage() {
   const canRead = hasPermission("stats", "read")
 
   const filteredOrders = useMemo(() => {
-    let filtered = orders.filter((order) => order.status === "confirmed")
+    let filtered = [...orders]
 
     if (dateFrom) {
-      filtered = filtered.filter((order) => new Date(order.createdAt) >= new Date(dateFrom))
+      filtered = filtered.filter((order) => {
+        const dateVal = order.createdAt ?? order.fecha
+        const dt = dateVal ? new Date(dateVal) : null
+        return dt ? dt >= new Date(dateFrom) : false
+      })
     }
     if (dateTo) {
-      filtered = filtered.filter((order) => new Date(order.createdAt) <= new Date(dateTo))
+      filtered = filtered.filter((order) => {
+        const dateVal = order.createdAt ?? order.fecha
+        const dt = dateVal ? new Date(dateVal) : null
+        return dt ? dt <= new Date(dateTo) : false
+      })
     }
 
     return filtered
@@ -48,7 +56,7 @@ export default function StatsPage() {
     const totalSales = filteredOrders.reduce((sum, order) => sum + order.total, 0)
     const totalOrders = filteredOrders.length
     const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0
-    const totalCustomers = new Set(filteredOrders.map((order) => order.customerId)).size
+    const totalCustomers = new Set(filteredOrders.map((order) => order.codigoCliente)).size
 
     return {
       totalSales,
@@ -62,8 +70,8 @@ export default function StatsPage() {
     const customerData = new Map()
 
     filteredOrders.forEach((order) => {
-      const customerId = order.customerId
-      const customer = customers.find((c) => c.id === customerId)
+      const customerId = order.codigoCliente
+      const customer = customers.find((c) => c.codigoCliente === customerId)
 
       if (!customerData.has(customerId)) {
         customerData.set(customerId, {
@@ -77,7 +85,7 @@ export default function StatsPage() {
       const data = customerData.get(customerId)
       data.totalSales += order.total
       data.orderCount += 1
-      data.totalItems += order.items.reduce((sum, item) => sum + item.quantity, 0)
+      data.totalItems += order.items.reduce((sum, item) => sum + (item.cantidad ?? 0), 0)
     })
 
     return Array.from(customerData.values())
@@ -90,10 +98,10 @@ export default function StatsPage() {
 
     filteredOrders.forEach((order) => {
       order.items.forEach((item) => {
-        const product = products.find((p) => p.id === item.productId)
+        const product = products.find((p) => p.codigoProducto === item.productoId)
 
-        if (!productData.has(item.productId)) {
-          productData.set(item.productId, {
+        if (!productData.has(item.productoId)) {
+          productData.set(item.productoId, {
             product,
             totalSales: 0,
             quantitySold: 0,
@@ -101,9 +109,9 @@ export default function StatsPage() {
           })
         }
 
-        const data = productData.get(item.productId)
-        data.totalSales += item.total
-        data.quantitySold += item.quantity
+        const data = productData.get(item.productoId)
+        data.totalSales += item.total ?? item.subtotal ?? 0
+        data.quantitySold += item.cantidad ?? 0
         data.orderCount += 1
       })
     })
@@ -118,8 +126,8 @@ export default function StatsPage() {
 
     filteredOrders.forEach((order) => {
       order.items.forEach((item) => {
-        const product = products.find((p) => p.id === item.productId)
-        const category = product?.category || "Sin categoría"
+        const product = products.find((p) => p.codigoProducto === item.productoId)
+        const category = (product as any)?.categoria || "Sin categoría"
 
         if (!categoryData.has(category)) {
           categoryData.set(category, {
@@ -131,9 +139,9 @@ export default function StatsPage() {
         }
 
         const data = categoryData.get(category)
-        data.totalSales += item.total
-        data.quantitySold += item.quantity
-        data.productCount.add(item.productId)
+        data.totalSales += item.total ?? item.subtotal ?? 0
+        data.quantitySold += item.cantidad ?? 0
+        data.productCount.add(item.productoId)
       })
     })
 
@@ -149,7 +157,7 @@ export default function StatsPage() {
     const monthlyData = new Map()
 
     filteredOrders.forEach((order) => {
-      const date = new Date(order.createdAt)
+      const date = new Date(order.createdAt ?? order.fecha)
       const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
 
       if (!monthlyData.has(monthKey)) {
@@ -305,7 +313,7 @@ export default function StatsPage() {
                         <YAxis />
                         <ChartTooltip
                           content={<ChartTooltipContent />}
-                          formatter={(value) => [`Q${Number(value).toLocaleString()}`, "Ventas"]}
+                          formatter={(value: number | string) => [`Q${Number(value).toLocaleString()}`, "Ventas"]}
                         />
                         <Line
                           type="monotone"
@@ -339,13 +347,13 @@ export default function StatsPage() {
                           cy="50%"
                           outerRadius={80}
                           dataKey="value"
-                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                          label={(props: any) => `${props.name} ${(Number(props.percent) * 100).toFixed(0)}%`}
                         >
                           {chartData.categories.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.fill} />
                           ))}
                         </Pie>
-                        <ChartTooltip formatter={(value) => [`Q${Number(value).toLocaleString()}`, "Ventas"]} />
+                        <ChartTooltip formatter={(value: number | string) => [`Q${Number(value).toLocaleString()}`, "Ventas"]} />
                       </PieChart>
                     </ResponsiveContainer>
                   </ChartContainer>
@@ -379,7 +387,7 @@ export default function StatsPage() {
                       <YAxis dataKey="name" type="category" width={120} />
                       <ChartTooltip
                         content={<ChartTooltipContent />}
-                        formatter={(value) => [`Q${Number(value).toLocaleString()}`, "Ventas"]}
+                        formatter={(value: number | string) => [`Q${Number(value).toLocaleString()}`, "Ventas"]}
                       />
                       <Bar dataKey="ventas" fill="hsl(217, 91%, 60%)" radius={[0, 4, 4, 0]} />
                     </BarChart>

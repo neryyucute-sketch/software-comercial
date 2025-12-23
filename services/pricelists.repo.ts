@@ -1,5 +1,5 @@
-import { db } from "@/lib/db"
-import type { PriceList } from "@/lib/types"
+import { db } from "../lib/db"
+import type { PriceList } from "../lib/types"
 import { getAccessToken } from "./auth"
 
 const API = process.env.NEXT_PUBLIC_API_URL || ""
@@ -29,7 +29,7 @@ const normalizeLocalPriceList = (pl: Partial<PriceList>): (PriceList & { idt: st
 
 export async function getPriceListsLocal(): Promise<PriceList[]> {
   const rows = await db.priceLists.toArray()
-  return rows.map((pl) => normalizeLocalPriceList(pl))
+  return rows.map((pl): PriceList => normalizeLocalPriceList(pl))
 }
 
 export async function upsertPriceListLocal(list: Partial<PriceList>): Promise<PriceList> {

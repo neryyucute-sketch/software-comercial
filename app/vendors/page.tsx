@@ -17,7 +17,11 @@ import { useAuth } from "@/contexts/AuthContext"
 import type { Vendor } from "@/lib/types"
 
 export default function VendorsPage() {
-  const { vendors, addVendor, updateVendor, deleteVendor } = usePreventa()
+  const preventa = usePreventa() as any
+  const vendors: Vendor[] = preventa?.vendors ?? preventa?.vendedor ?? []
+  const addVendor: (v: any) => void = preventa?.addVendor ?? (() => {})
+  const updateVendor: (id: any, v: any) => void = preventa?.updateVendor ?? (() => {})
+  const deleteVendor: (id: any) => void = preventa?.deleteVendor ?? (() => {})
   const { hasPermission } = useAuth()
   const [searchTerm, setSearchTerm] = useState("")
   const [showForm, setShowForm] = useState(false)

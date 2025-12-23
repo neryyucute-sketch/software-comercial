@@ -16,6 +16,18 @@ const ASSETS_TO_CACHE = [
     "/icon-512.png",
     "/offline.html",
 ];
+// service-worker.ts (fragmento)
+sw.addEventListener("sync", (event) => {
+    if (event.tag === "sync-pedidos") {
+        event.waitUntil(sw.clients.matchAll().then(() => { })); // opcional
+        event.waitUntil(sw.syncPedidos?.() ?? Promise.resolve());
+    }
+});
+self.addEventListener("message", (event) => {
+    if (event.data === "SYNC_PEDIDOS_NOW") {
+        event.waitUntil?.(self.syncPedidos?.() ?? Promise.resolve());
+    }
+});
 // Endpoints críticos
 const CRITICAL_APIS = ["/api/catalogos", "/api/clientes", "/api/productos"];
 // 📌 Instalación → cachear assets
@@ -53,16 +65,28 @@ async function cacheFirstUpdateImages(request) {
     const cache = await caches.open(IMAGE_CACHE);
     const cached = await cache.match(request);
     if (cached) {
-        fetch(request).then((res) => {
-            if (res.ok)
-                cache.put(request, res.clone());
+        fetch(request).then(async (res) => {
+            if (res.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
+                try {
+                    await cache.put(request, res.clone());
+                }
+                catch (e) {
+                    console.warn("[sw] cache.put failed (images update):", e);
+                }
+            }
         });
         return cached;
     }
     try {
         const res = await fetch(request);
-        if (res.ok)
-            cache.put(request, res.clone());
+        if (res.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
+            try {
+                await cache.put(request, res.clone());
+            }
+            catch (e) {
+                console.warn("[sw] cache.put failed (images fetch):", e);
+            }
+        }
         return res;
     }
     catch {
@@ -75,11 +99,17 @@ async function staleWhileRevalidate(request) {
     const cachedResponse = await cache.match(request);
     try {
         const fetchResponse = await fetch(request);
-        if (fetchResponse.ok)
-            cache.put(request, fetchResponse.clone());
+        if (fetchResponse.ok && (request.url.startsWith("http://") || request.url.startsWith("https://"))) {
+            try {
+                await cache.put(request, fetchResponse.clone());
+            }
+            catch (e) {
+                console.warn("[sw] cache.put failed (staleWhileRevalidate):", e);
+            }
+        }
         return fetchResponse;
     }
-    catch {
+    catch (err) {
         if (cachedResponse)
             return cachedResponse;
         return new Response("Offline", { status: 503 });
@@ -95,11 +125,16 @@ async function networkFirstAPI(request) {
     try {
         const response = await fetch(request);
         if (response.ok && isCacheableRequest(request)) {
-            cache.put(request, response.clone());
+            try {
+                await cache.put(request, response.clone());
+            }
+            catch (e) {
+                console.warn("[sw] cache.put failed (networkFirstAPI):", e);
+            }
         }
         return response;
     }
-    catch {
+    catch (err) {
         const cached = await cache.match(request);
         return cached || new Response("Offline data not available", { status: 503 });
     }

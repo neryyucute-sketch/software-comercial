@@ -52,6 +52,9 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
   tableRowAlt: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderColor: "#e2e8f0",
     backgroundColor: "#f8fafc",
   },
   cell: { paddingVertical: 6, paddingHorizontal: 6, borderRightWidth: 1, borderColor: "#e2e8f0", fontSize: 9 },

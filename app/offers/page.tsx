@@ -370,7 +370,7 @@ async function cargarCatalogos() {
           matchArray(o.products || o.scope?.codigosProducto),
           matchArray(o.scope?.codigosCliente),
           matchArray(o.proveedores || o.scope?.codigosProveedor),
-          matchArray(o.scope?.codigosLinea || o.lineas || o.familias || []),
+          matchArray(o.scope?.codigosLinea || o.familias || []),
           matchArray(o.scope?.canales),
           matchArray(o.scope?.subCanales),
           matchTerm(tipoLabel),
@@ -551,11 +551,9 @@ async function cargarCatalogos() {
                   pricelist: <ListChecks className="h-4 w-4 mr-1" />,
                 }[oferta.type] || <Tag className="h-4 w-4 mr-1" />;
 
-                 // Calcular el total bruto del pedido (sin descuento)
-                 // Suponiendo que oferta tiene un array 'items' con { cantidad, precioUnitario }
-                 // Si no existe, mostrar 0
-                 const totalBruto = Array.isArray(oferta.items)
-                   ? oferta.items.reduce((sum, item) => sum + (item.cantidad * item.precioUnitario), 0)
+                 // Calcular el total bruto: usamos productos seleccionados si existen
+                 const totalBruto = Array.isArray(oferta.products)
+                   ? oferta.products.length
                    : 0;
                 return (
                   <div

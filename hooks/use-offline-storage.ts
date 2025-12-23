@@ -116,7 +116,7 @@ export function useOfflineStorage() {
       const index = store.index("synced")
 
       return new Promise((resolve, reject) => {
-        const request = index.getAll(false) // Get unsynced orders
+        const request = index.getAll(IDBKeyRange.only(false)) // get unsynced orders via index
         request.onsuccess = () => resolve(request.result)
         request.onerror = () => reject(request.error)
       })
@@ -144,10 +144,15 @@ export function useOfflineStorage() {
       const transaction = db.transaction(["orders"], "readwrite")
       const store = transaction.objectStore("orders")
 
-      const order = await store.get(orderId)
+      const order = await new Promise<any | undefined>((resolve, reject) => {
+        const req = store.get(orderId)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      })
+
       if (order) {
-        order.synced = true
-        await store.put(order)
+        const updated = { ...order, synced: true }
+        await store.put(updated)
       }
     } catch (error) {
       console.error("Error marking order as synced:", error)

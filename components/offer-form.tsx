@@ -211,20 +211,23 @@ export function OfferForm({ offer, onClose }: OfferFormProps) {
                   <p className="text-gray-500 text-sm">No hay productos activos disponibles</p>
                 ) : (
                   <div className="space-y-2">
-                    {activeProducts.map((product) => (
-                      <div key={product.idt} className="flex items-center space-x-2">
-                        <input
-                          type="checkbox"
-                          id={`product-${product.idt}`}
-                          checked={formData.products.includes(product.idt)}
-                          onChange={() => handleProductToggle(product.idt)}
-                          className="rounded border-gray-300"
-                        />
-                        <label htmlFor={`product-${product.idt}`} className="flex-1 text-sm">
-                          {product.descripcion} - Q{product.precio.toLocaleString()}
-                        </label>
-                      </div>
-                    ))}
+                    {activeProducts.map((product) => {
+                      const price = product.precio ?? 0
+                      return (
+                        <div key={product.idt} className="flex items-center space-x-2">
+                          <input
+                            type="checkbox"
+                            id={`product-${product.idt}`}
+                            checked={formData.products.includes(product.idt)}
+                            onChange={() => handleProductToggle(product.idt)}
+                            className="rounded border-gray-300"
+                          />
+                          <label htmlFor={`product-${product.idt}`} className="flex-1 text-sm">
+                            {product.descripcion} - Q{price.toLocaleString()}
+                          </label>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </Card>

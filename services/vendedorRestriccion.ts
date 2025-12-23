@@ -1,4 +1,4 @@
-import type { VendedorRestriccion } from "../types/types";
+import type { VendedorRestriccion } from "../lib/types";
 import { getAccessToken } from "./auth";
 import { saveData, getData } from "../lib/db";
 

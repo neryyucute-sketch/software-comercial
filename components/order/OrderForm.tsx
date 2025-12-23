@@ -8,13 +8,17 @@ import { OrderItemsList } from "./components/OrderItemsList";
 import { OrderSummary } from "./components/OrderSummary";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { ProductSelectionModal } from "./modals/ProductSelectionModal";
+import ProductSelectionModal from "./modals/ProductSelectionModal";
 import { useOrders } from "@/contexts/OrdersContext";
 
 // 🔒 Seguridad: Usar crypto.randomUUID() nativo para IDs seguros
 function uuidSimple(): string {
   return crypto.randomUUID();
 }
+
+type OrderPayload = Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> & {
+  customerId?: string;
+};
 
 export default function OrderForm() {
   const { addOrder, syncOrders } = useOrders();
@@ -57,13 +61,20 @@ export default function OrderForm() {
   const onConfirm = async () => {
     if (!canSave) return;
     const localId = uuidSimple();
-    const payload: Omit<Order, "id" | "status" | "synced" | "attempts" | "createdAt"> = {
+    const nowIso = new Date().toISOString();
+    const payload: OrderPayload = {
       localId,
       serverId: null,
       customerId,
+      codigoEmpresa: "LOCAL",
+      codigoCliente: customerId,
+      codigoVendedor: "LOCAL",
+      fecha: nowIso,
+      estado: "ingresado",
       items,
-      discount,
+      subtotal: itemsTotal,
       total,
+      discount,
       notes,
       photos: [],
       location: null,

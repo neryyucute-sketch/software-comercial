@@ -6,16 +6,28 @@ export function getComboOptionalProducts(combo: Combo, products: Product[]): Pro
   let optional: Product[] = []
 
   if (combo.optionalProductLines?.length) {
-    optional = products.filter((p) => p.isActive && combo.optionalProductLines.includes(p.category))
+    optional = products.filter((p) => {
+      const categoria = p.categoria ?? p.codigoCategoria ?? p.codigoLinea ?? p.codigoFiltroVenta ?? ""
+      return p.isActive !== false && combo.optionalProductLines.includes(categoria)
+    })
   }
 
   if (combo.optionalProductIds?.length) {
-    const specific = products.filter((p) => p.isActive && combo.optionalProductIds.includes(p.id))
+    const specific = products.filter((p) => {
+      const pid = p.codigoProducto ?? p.idt ?? (p as any).id ?? ""
+      return p.isActive !== false && combo.optionalProductIds!.includes(pid)
+    })
     optional = [...optional, ...specific]
   }
 
   const seen = new Set<string>()
-  return optional.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
+  return optional.filter((p) => {
+    const pid = p.codigoProducto ?? p.idt ?? (p as any).id ?? ""
+    if (!pid) return false
+    if (seen.has(pid)) return false
+    seen.add(pid)
+    return true
+  })
 }
 
 export function dateOnly(d: Date): Date {

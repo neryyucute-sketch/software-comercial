@@ -3,45 +3,71 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { X, TrendingUp, ShoppingCart, Calendar, DollarSign } from "lucide-react"
-import type { Customer } from "@/lib/types"
 import { usePreventa } from "@/contexts/preventa-context"
 
+type CustomerLite = {
+  id?: string
+  idt?: string
+  code?: string
+  codigoCliente?: string
+  name?: string
+  nombreCliente?: string
+}
+
 interface CustomerStatsProps {
-  customer: Customer
+  customer: CustomerLite
   onClose: () => void
 }
 
 export default function CustomerStatsModal({ customer, onClose }: CustomerStatsProps) {
   const { orders, products } = usePreventa()
 
+  const customerId = customer.codigoCliente || customer.code || customer.id || customer.idt || ""
+  const customerName = customer.name || customer.nombreCliente || "Cliente"
+
+  const normalizeDate = (value: unknown, fallback?: unknown): Date => {
+    if (value instanceof Date) return value
+    if (typeof value === "string" || typeof value === "number") return new Date(value)
+    if (fallback instanceof Date) return fallback
+    if (typeof fallback === "string" || typeof fallback === "number") return new Date(fallback)
+    return new Date()
+  }
+
   // Calcular estadísticas del cliente
-  const customerOrders = orders.filter((order) => order.customerId === customer.id)
+  const customerOrders = orders.filter((order) => order.codigoCliente === customerId)
   const totalOrders = customerOrders.length
   const totalAmount = customerOrders.reduce((sum, order) => sum + order.total, 0)
   const averageOrderValue = totalOrders > 0 ? totalAmount / totalOrders : 0
   const lastOrderDate =
     customerOrders.length > 0
-      ? new Date(Math.max(...customerOrders.map((order) => order.createdAt.getTime())))
+      ? new Date(
+          Math.max(
+            ...customerOrders.map((order) => normalizeDate((order as any).createdAt, (order as any).fecha).getTime()),
+          ),
+        )
       : undefined
 
   // Productos más comprados
   const productStats = new Map<string, { quantity: number; amount: number }>()
   customerOrders.forEach((order) => {
     order.items.forEach((item) => {
-      const current = productStats.get(item.productId) || { quantity: 0, amount: 0 }
-      productStats.set(item.productId, {
-        quantity: current.quantity + item.quantity,
-        amount: current.amount + item.total,
+      const productId = (item as any).productoId || (item as any).productId || item.id || ""
+      const current = productStats.get(productId) || { quantity: 0, amount: 0 }
+      const lineAmount = (item as any).total ?? (item as any).subtotal ?? 0
+      const qty = (item as any).cantidad ?? (item as any).quantity ?? 0
+      productStats.set(productId, {
+        quantity: current.quantity + qty,
+        amount: current.amount + lineAmount,
       })
     })
   })
 
   const topProducts = Array.from(productStats.entries())
     .map(([productId, stats]) => {
-      const product = products.find((p) => p.id === productId)
+      const product = products.find((p) => p.idt === productId || (p as any).id === productId)
       return {
         productId,
-        productName: product?.name || "Producto no encontrado",
+        productName: (product as any)?.descripcion || (product as any)?.name || "Producto no encontrado",
         quantity: stats.quantity,
         totalAmount: stats.amount,
       }
@@ -57,7 +83,7 @@ export default function CustomerStatsModal({ customer, onClose }: CustomerStatsP
     const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
 
     const monthOrders = customerOrders.filter((order) => {
-      const orderDate = new Date(order.createdAt)
+      const orderDate = normalizeDate((order as any).createdAt, (order as any).fecha)
       return orderDate.getFullYear() === date.getFullYear() && orderDate.getMonth() === date.getMonth()
     })
 
@@ -73,7 +99,7 @@ export default function CustomerStatsModal({ customer, onClose }: CustomerStatsP
       <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
         <div className="p-6">
           <div className="flex justify-between items-center mb-6">
-            <h2 className="text-2xl font-bold">Estadísticas de {customer.name}</h2>
+            <h2 className="text-2xl font-bold">Estadísticas de {customerName}</h2>
             <Button variant="ghost" size="sm" onClick={onClose}>
               <X className="h-4 w-4" />
             </Button>
@@ -176,18 +202,22 @@ export default function CustomerStatsModal({ customer, onClose }: CustomerStatsP
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {customerOrders.slice(0, 5).map((order) => (
-                  <div key={order.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <div>
-                      <p className="font-medium">Pedido #{order.id}</p>
-                      <p className="text-sm text-gray-500">{order.createdAt.toLocaleDateString()}</p>
+                {customerOrders.slice(0, 5).map((order) => {
+                  const orderDate = normalizeDate((order as any).createdAt, (order as any).fecha)
+                  const orderStatus = (order as any).status ?? (order as any).estado ?? "N/A"
+                  return (
+                    <div key={order.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div>
+                        <p className="font-medium">Pedido #{order.id}</p>
+                        <p className="text-sm text-gray-500">{orderDate.toLocaleDateString()}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-semibold">Q{order.total.toLocaleString()}</p>
+                        <Badge variant={orderStatus === "entregado" ? "default" : "secondary"}>{orderStatus}</Badge>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <p className="font-semibold">Q{order.total.toLocaleString()}</p>
-                      <Badge variant={order.status === "entregado" ? "default" : "secondary"}>{order.status}</Badge>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </CardContent>
           </Card>

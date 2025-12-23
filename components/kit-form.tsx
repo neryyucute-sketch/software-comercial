@@ -21,7 +21,12 @@ interface KitFormProps {
 }
 
 export function KitForm({ kit, onClose }: KitFormProps) {
-  const { products, customers, vendors, addKit, updateKit } = usePreventa()
+  const preventa = usePreventa() as any
+  const products: any[] = preventa?.products ?? []
+  const customers: any[] = preventa?.customers ?? []
+  const vendors: any[] = preventa?.vendors ?? preventa?.vendedor ?? []
+  const addKit = preventa?.addKit ?? (() => {})
+  const updateKit = preventa?.updateKit ?? (() => {})
   const [activeTab, setActiveTab] = useState("basic")
   const [formData, setFormData] = useState({
     name: "",
@@ -44,10 +49,34 @@ export function KitForm({ kit, onClose }: KitFormProps) {
   const [customerRestrictionType, setCustomerRestrictionType] = useState<"channel" | "specific">("channel")
 
   // Datos derivados para los selectores
-  const categories = [...new Set((products || []).map((p) => p.category))]
-  const regions = [...new Set((customers || []).map((c) => c.region))]
-  const channels = [...new Set((customers || []).map((c) => c.channel))]
-  const codes = [...new Set((customers || []).map((c) => c.code))]
+  const categories = [
+    ...new Set(
+      (products || [])
+        .map((p: any) => p.category)
+        .filter((category: any): category is string => typeof category === "string" && category.trim().length > 0),
+    ),
+  ]
+  const regions = [
+    ...new Set(
+      (customers || [])
+        .map((c: any) => c.region || c.rutaVenta)
+        .filter((region: any): region is string => typeof region === "string" && region.trim().length > 0),
+    ),
+  ]
+  const channels = [
+    ...new Set(
+      (customers || [])
+        .map((c: any) => c.channel || c.canalVenta)
+        .filter((channel: any): channel is string => typeof channel === "string" && channel.trim().length > 0),
+    ),
+  ]
+  const codes = [
+    ...new Set(
+      (customers || [])
+        .map((c: any) => c.code || c.codigoCliente)
+        .filter((code: any): code is string => typeof code === "string" && code.trim().length > 0),
+    ),
+  ]
 
   const [selectedCategory, setSelectedCategory] = useState<string>("")
   const [searchTerm, setSearchTerm] = useState("")
@@ -68,7 +97,13 @@ export function KitForm({ kit, onClose }: KitFormProps) {
         validTo: `${validToDate.getFullYear()}-${String(validToDate.getMonth() + 1).padStart(2, "0")}-${String(validToDate.getDate()).padStart(2, "0")}`,
         isActive: kit.isActive,
       })
-      setKitProducts(kit.products)
+      setKitProducts(
+        (kit.products || []).map((p: any) => ({
+          productId: p.productId ?? p.id ?? p.idt ?? "",
+          isFixed: p.isFixed ?? true,
+          quantity: p.quantity ?? 1,
+        })).filter((p: ComboProduct) => !!p.productId)
+      )
       setRestrictions(kit.restrictions)
 
       if (kit.restrictions.customerCriteria?.codes && kit.restrictions.customerCriteria.codes.length > 0) {
@@ -163,8 +198,9 @@ export function KitForm({ kit, onClose }: KitFormProps) {
 
   const getTotalValue = () => {
     return kitProducts.reduce((total, kitProduct) => {
-      const product = products?.find((p) => p.id === kitProduct.productId)
-      return total + (product ? product.price * kitProduct.quantity : 0)
+      const product = products?.find((p: any) => (p.id ?? p.idt) === kitProduct.productId)
+      const price = product?.price ?? 0
+      return total + price * kitProduct.quantity
     }, 0)
   }
 
@@ -172,19 +208,24 @@ export function KitForm({ kit, onClose }: KitFormProps) {
     return kitProducts.some((kp) => kp.productId === productId)
   }
 
-  const filteredCategories = categories.filter(
-    (category) => category && category.toLowerCase().includes(searchTerm.toLowerCase()),
+  const filteredCategories = categories.filter((category) =>
+    category && category.toLowerCase().includes(searchTerm.toLowerCase()),
   )
 
   const filteredProducts = selectedCategory
-    ? (products || []).filter(
-        (p) =>
-          p.category === selectedCategory &&
-          p.isActive &&
-          p.name &&
-          p.name.toLowerCase().includes(searchTerm.toLowerCase()),
-      )
-    : (products || []).filter((p) => p.isActive && p.name && p.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    ? (products || []).filter((p: any) => {
+        const name = p.name || p.descripcion
+        return (
+          (p.category === selectedCategory || p.categoria === selectedCategory || p.linea === selectedCategory) &&
+          p.isActive !== false &&
+          name &&
+          name.toLowerCase().includes(searchTerm.toLowerCase())
+        )
+      })
+    : (products || []).filter((p: any) => {
+        const name = p.name || p.descripcion
+        return p.isActive !== false && name && name.toLowerCase().includes(searchTerm.toLowerCase())
+      })
 
   return (
     <Dialog open={true} onOpenChange={onClose}>
@@ -293,7 +334,7 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                 <div className="space-y-3">
                   <h4 className="font-medium">Productos incluidos ({kitProducts.length}):</h4>
                   {kitProducts.map((kitProduct) => {
-                    const product = products?.find((p) => p.id === kitProduct.productId)
+                    const product = products?.find((p: any) => (p.id ?? p.idt) === kitProduct.productId)
                     return (
                       <Card key={kitProduct.productId} className="p-4">
                         <div className="flex justify-between items-center">
@@ -301,7 +342,7 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                             <h5 className="font-medium">{product?.name}</h5>
                             <p className="text-sm text-gray-600">
                               Q{product?.price.toLocaleString()} × {kitProduct.quantity} = Q
-                              {product ? (product.price * kitProduct.quantity).toLocaleString() : "0"}
+                              {product ? ((product.price ?? 0) * kitProduct.quantity).toLocaleString() : "0"}
                             </p>
                           </div>
                           <div className="flex items-center gap-2">
@@ -408,8 +449,12 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {categories.slice(categoryIndex, categoryIndex + 3).map((category) => {
-                      const categoryProducts = (products || []).filter((p) => p.category === category && p.isActive)
+                    {categories.slice(categoryIndex, categoryIndex + 3).map((category: string) => {
+                      const categoryProducts = (products || []).filter(
+                        (p: any) =>
+                          (p.category === category || p.categoria === category || p.linea === category) &&
+                          p.isActive !== false,
+                      )
                       return (
                         <Card
                           key={category}
@@ -443,11 +488,15 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                       Productos de: <span className="text-blue-600">{selectedCategory}</span>
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-96 overflow-y-auto">
-                      {filteredProducts.map((product) => {
-                        const isSelected = isProductSelected(product.id)
+                      {filteredProducts.map((product: any) => {
+                        const productId = product.id ?? product.idt ?? ""
+                        const productName = product.name || product.descripcion || "Producto"
+                        const price = product.price ?? 0
+                        const stock = (product as any).stock ?? (product as any).inventario
+                        const isSelected = isProductSelected(productId)
                         return (
                           <Card
-                            key={product.id}
+                            key={productId}
                             className={`p-4 transition-all ${
                               isSelected ? "border-green-500 bg-green-50 shadow-md" : "hover:shadow-md border-gray-200"
                             }`}
@@ -455,21 +504,21 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                             <div className="flex justify-between items-start">
                               <div className="flex-1">
                                 <div className="flex items-center gap-2">
-                                  <h6 className="font-medium text-sm">{product.name}</h6>
+                                  <h6 className="font-medium text-sm">{productName}</h6>
                                   {isSelected && (
                                     <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
                                       <Check className="w-3 h-3 text-white" />
                                     </div>
                                   )}
                                 </div>
-                                <p className="text-sm text-gray-600 mt-1">Q{product.price.toLocaleString()}</p>
-                                <p className="text-xs text-gray-500 mt-1">Stock: {product.stock}</p>
+                                <p className="text-sm text-gray-600 mt-1">Q{price.toLocaleString()}</p>
+                                <p className="text-xs text-gray-500 mt-1">Stock: {stock ?? ""}</p>
                               </div>
                               <Button
                                 type="button"
                                 variant={isSelected ? "default" : "outline"}
                                 size="sm"
-                                onClick={() => addProduct(product.id)}
+                                onClick={() => addProduct(productId)}
                                 disabled={isSelected}
                                 className={isSelected ? "bg-green-600 hover:bg-green-700" : ""}
                               >
@@ -487,11 +536,17 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                   <div>
                     <h4 className="font-medium mb-3">Resultados de búsqueda: "{searchTerm}"</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-96 overflow-y-auto">
-                      {filteredProducts.map((product) => {
-                        const isSelected = isProductSelected(product.id)
+                      {filteredProducts.map((product: any) => {
+                        const productId = product.id ?? product.idt ?? ""
+                        if (!productId) return null
+                        const productName = product.name || product.descripcion || "Producto"
+                        const price = product.price ?? 0
+                        const stock = product.stock ?? product.inventario
+                        const category = product.category || product.categoria || product.linea || ""
+                        const isSelected = isProductSelected(productId)
                         return (
                           <Card
-                            key={product.id}
+                            key={productId}
                             className={`p-4 transition-all ${
                               isSelected ? "border-green-500 bg-green-50 shadow-md" : "hover:shadow-md border-gray-200"
                             }`}
@@ -499,22 +554,22 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                             <div className="flex justify-between items-start">
                               <div className="flex-1">
                                 <div className="flex items-center gap-2">
-                                  <h6 className="font-medium text-sm">{product.name}</h6>
+                                  <h6 className="font-medium text-sm">{productName}</h6>
                                   {isSelected && (
                                     <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
                                       <Check className="w-3 h-3 text-white" />
                                     </div>
                                   )}
                                 </div>
-                                <p className="text-sm text-blue-600 mt-1">{product.category}</p>
-                                <p className="text-sm text-gray-600">Q{product.price.toLocaleString()}</p>
-                                <p className="text-xs text-gray-500 mt-1">Stock: {product.stock}</p>
+                                <p className="text-sm text-blue-600 mt-1">{category}</p>
+                                <p className="text-sm text-gray-600">Q{price.toLocaleString()}</p>
+                                <p className="text-xs text-gray-500 mt-1">Stock: {stock ?? ""}</p>
                               </div>
                               <Button
                                 type="button"
                                 variant={isSelected ? "default" : "outline"}
                                 size="sm"
-                                onClick={() => addProduct(product.id)}
+                                onClick={() => addProduct(productId)}
                                 disabled={isSelected}
                                 className={isSelected ? "bg-green-600 hover:bg-green-700" : ""}
                               >
@@ -544,7 +599,7 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                 <h4 className="font-medium mb-3">Restricciones por Región</h4>
                 <p className="text-sm text-gray-600 mb-3">Selecciona las regiones donde estará disponible este kit:</p>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  {regions.map((region) => (
+                  {regions.map((region: string) => (
                     <div key={region} className="flex items-center space-x-2">
                       <Checkbox
                         id={`region-${region}`}
@@ -595,7 +650,7 @@ export function KitForm({ kit, onClose }: KitFormProps) {
                     </p>
                     <div className="space-y-2">
                       {restrictions.vendorIds.map((vendorId) => {
-                        const vendor = (vendors || []).find((v) => v.idt === vendorId)
+                        const vendor = (vendors || []).find((v: any) => String(v.idt) === String(vendorId))
                         return vendor ? (
                           <div key={vendorId} className="flex items-center justify-between bg-white p-2 rounded border">
                             <div>
@@ -627,49 +682,52 @@ export function KitForm({ kit, onClose }: KitFormProps) {
 
                 <div className="max-h-48 overflow-y-auto space-y-2">
                   {(vendors || [])
-                    .sort((a, b) => {
-                      const aSelected = restrictions.vendorIds?.includes(a.idt) || false
-                      const bSelected = restrictions.vendorIds?.includes(b.idt) || false
+                    .sort((a: any, b: any) => {
+                      const aId = String(a.idt ?? "")
+                      const bId = String(b.idt ?? "")
+                      const aSelected = restrictions.vendorIds?.includes(aId) || false
+                      const bSelected = restrictions.vendorIds?.includes(bId) || false
                       if (aSelected && !bSelected) return -1
                       if (!aSelected && bSelected) return 1
                       return 0
                     })
                     .filter(
-                      (vendor) =>
-                        vendor.activo &&
-                        (vendor.primer_nombre.toLowerCase().includes(vendorSearch.toLowerCase()) ||
-                          vendor.primer_apellido.toLowerCase().includes(vendorSearch.toLowerCase()) ||
-                          vendor.numero_ruta.toLowerCase().includes(vendorSearch.toLowerCase())),
+                      (vendor: any) =>
+                        vendor?.activo &&
+                        ((vendor.primer_nombre && vendor.primer_nombre.toLowerCase().includes(vendorSearch.toLowerCase())) ||
+                          (vendor.primer_apellido && vendor.primer_apellido.toLowerCase().includes(vendorSearch.toLowerCase())) ||
+                          (vendor.numero_ruta && vendor.numero_ruta.toLowerCase().includes(vendorSearch.toLowerCase()))),
                     )
-                    .map((vendor) => {
-                      const isSelected = restrictions.vendorIds?.includes(vendor.idt) || false
+                    .map((vendor: any) => {
+                      const vendorId = String(vendor.idt ?? "")
+                      const isSelected = restrictions.vendorIds?.includes(vendorId) || false
                       return (
                         <div
-                          key={vendor.idt}
+                          key={vendorId}
                           className={`flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 ${
                             isSelected ? "border-blue-500 bg-blue-50" : ""
                           }`}
                         >
                           <div className="flex items-center space-x-3">
                             <Checkbox
-                              id={`vendor-${vendor.idt}`}
+                              id={`vendor-${vendorId}`}
                               checked={isSelected}
                               onCheckedChange={(checked) => {
                                 if (checked) {
                                   setRestrictions({
                                     ...restrictions,
-                                    vendorIds: [...(restrictions.vendorIds || []), vendor.idt],
+                                    vendorIds: [...(restrictions.vendorIds || []), vendorId],
                                   })
                                 } else {
                                   setRestrictions({
                                     ...restrictions,
-                                    vendorIds: restrictions.vendorIds?.filter((id) => id !== vendor.idt),
+                                    vendorIds: restrictions.vendorIds?.filter((id) => id !== vendorId),
                                   })
                                 }
                               }}
                             />
                             <div>
-                              <Label htmlFor={`vendor-${vendor.idt}`} className="font-medium">
+                              <Label htmlFor={`vendor-${vendorId}`} className="font-medium">
                                 {vendor.codigo} - {vendor.primer_nombre} {vendor.primer_apellido}
                               </Label>
                               <p className="text-sm text-gray-500">

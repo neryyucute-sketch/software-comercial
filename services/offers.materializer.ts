@@ -18,18 +18,39 @@ export async function materializeOffer(offerId: string) {
 
   // Combos / kits → pack_items + targets por cada producto del pack
   if (off.type === "combo" || off.type === "kit") {
-    for (const item of off.pack?.items ?? []) {
+    const fixedItems = off.pack?.itemsFijos ?? [];
+    const variableItems = off.pack?.itemsVariablesPermitidos ?? [];
+
+    for (const item of fixedItems) {
       await db.pack_items.add({
         offerId: off.id,
-        productId: item.productId,
-        qty: item.qty,
-        description: item.description,
+        productId: item.productoId,
+        qty: item.unidades,
+        description: item.descripcion,
       });
 
       await db.offer_targets.add({
         offerId: off.id,
         type: off.type,
-        productId: item.productId,
+        productId: item.productoId,
+        validFrom: vf,
+        validTo: vt,
+        status,
+      });
+    }
+
+    for (const item of variableItems) {
+      await db.pack_items.add({
+        offerId: off.id,
+        productId: item.productoId,
+        qty: 1,
+        description: item.descripcion,
+      });
+
+      await db.offer_targets.add({
+        offerId: off.id,
+        type: off.type,
+        productId: item.productoId,
         validFrom: vf,
         validTo: vt,
         status,

@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import type { Product } from "@/lib/types"
 import { X } from "lucide-react"
 import { z } from "zod"
 
@@ -25,10 +24,18 @@ const productSchema = z.object({
   presentacion: z.string().max(100),
 });
 
-type ProductPayload = Omit<Product, "id" | "createdAt">
+type ProductPayload = {
+  name: string;
+  description: string;
+  category: string;
+  price: number;
+  stock: number;
+  imageUrl: string;
+  isActive: boolean;
+}
 
 interface ProductFormProps {
-  product?: Product | null
+  product?: ProductPayload | null
   onClose: () => void
   onSubmit: (data: ProductPayload) => void
 }

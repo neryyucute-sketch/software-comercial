@@ -19,8 +19,16 @@ import {
 } from "@/components/ui/dialog"
 import { useLocalStorage } from "@/hooks/use-local-storage"
 import { useAuth } from "@/contexts/AuthContext"
-import type { Role, Permission } from "@/lib/types"
+import type { Role } from "@/lib/types"
 import { Plus, Edit, Trash2, Shield, Eye, Edit3, Trash, Ban, PlusCircle } from "lucide-react"
+
+type Permission = {
+  id: string
+  name: string
+  description?: string
+  module?: string
+  action?: string
+}
 
 export function RoleManagement() {
   const { hasPermission } = useAuth()

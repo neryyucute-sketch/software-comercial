@@ -1,6 +1,7 @@
 "use client"
 
 import { createContext, useContext, type ReactNode, useEffect, useState, useCallback } from "react"
+import type { Table } from "dexie"
 import type {
   Product,
   Cliente,
@@ -10,7 +11,6 @@ import type {
   Combo,
   Kit,
   Vendedor,
-  OrderTracking,
   OrderStatus,
   Visita,
 } from "@/lib/types"
@@ -35,15 +35,22 @@ const generateId = () => {
 
 const asDate = (v: any): Date => (v instanceof Date ? v : new Date(v))
 
-const normalizeOrders = (orders: Order[]): Order[] =>
-  orders.map((o) => ({
-    ...o,
-    createdAt: asDate(o.createdAt),
-    modifiedAt: o.modifiedAt ? asDate(o.modifiedAt) : undefined,
-    tracking: Array.isArray(o.tracking)
-      ? o.tracking.map((t) => ({ ...t, timestamp: asDate(t.timestamp) }))
-      : [],
-  }))
+type OrderRow = Order & {
+  id?: number | string
+  createdAt?: number | Date
+  status?: OrderStatus
+}
+
+const normalizeOrders = (orders: OrderRow[]): Order[] =>
+  orders.map((o) => {
+    const created = typeof o.createdAt === "number" ? o.createdAt : o.createdAt ? asDate(o.createdAt).getTime() : undefined
+    const id = typeof o.id === "string" ? o.id : o.localId ?? String(o.serverId ?? created ?? "")
+    return {
+      ...o,
+      id,
+      createdAt: created,
+    }
+  })
 
 
 const normalizeCombos = (items: Combo[]): Combo[] =>
@@ -100,6 +107,7 @@ type AddPriceListPayload = Omit<PriceList, "id" | "createdAt"> & { listCode?: st
 const PreventaContext = createContext<PreventaContextType | undefined>(undefined)
 
 export function PreventaProvider({ children }: { children: ReactNode }) {
+  const ordersTable = db.orders as unknown as Table<OrderRow, any>
   const [products, setProducts] = useState<Product[]>([])
   const [customers, setCustomers] = useState<Cliente[]>([])
   const [orders, setOrders] = useState<Order[]>([])
@@ -118,7 +126,7 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
       const [p, c, o, co, k, pl, v, vs] = await Promise.all([
         db.products.toArray(),
         db.clientes.toArray(),
-        db.orders.toArray(),
+        ordersTable.toArray(),
         db.combos.toArray(),
         db.kits.toArray(),
         db.priceLists.toArray(),
@@ -169,31 +177,29 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
 
   /* --------------------------------- Pedidos -------------------------------- */
   const addOrder = async (orderData: Omit<Order, "id" | "createdAt">) => {
+    const created = Date.now()
     const newOrder: Order = {
       ...orderData,
       id: generateId(),
-      createdAt: new Date(),
-      tracking: Array.isArray(orderData.tracking)
-        ? orderData.tracking.map((t) => ({ ...t, timestamp: asDate(t.timestamp) }))
-        : [],
+      createdAt: created,
     }
-    await db.orders.add(newOrder)
+    await ordersTable.add({ ...newOrder, createdAt: created })
     setOrders((prev) => [...prev, newOrder])
   }
 
   const updateOrder = async (id: string, orderData: Partial<Order>) => {
-    await db.orders.update(id, { ...orderData, modifiedAt: new Date() })
+    await ordersTable.update(id as any, { ...orderData })
     setOrders((prev) =>
       prev.map((o) =>
         o.id === id
           ? {
               ...o,
               ...orderData,
-              createdAt: orderData.createdAt ? asDate(orderData.createdAt) : o.createdAt,
-              modifiedAt: new Date(),
-              tracking: Array.isArray(orderData.tracking)
-                ? orderData.tracking.map((t) => ({ ...t, timestamp: asDate(t.timestamp) }))
-                : o.tracking,
+              createdAt: typeof orderData.createdAt === "number"
+                ? orderData.createdAt
+                : orderData.createdAt
+                  ? asDate(orderData.createdAt).getTime()
+                  : o.createdAt,
             }
           : o
       )
@@ -203,25 +209,13 @@ export function PreventaProvider({ children }: { children: ReactNode }) {
   const cancelOrder = async (id: string) => {
     const order = orders.find((o) => o.id === id)
     if (!order) return
-    const trackingEntry: OrderTracking = {
-      id: generateId(),
-      orderId: order.id,
+    await ordersTable.update(id as any, {
       status: "rechazado" as OrderStatus,
-      timestamp: new Date(),
-      userId: "system",
-      userName: "Sistema",
-      notes: "Pedido cancelado por el usuario",
-    }
-    await db.orders.update(id, {
-      status: "rechazado",
-      modifiedAt: new Date(),
-      tracking: [...(order.tracking || []), trackingEntry],
+      estado: "rechazado" as OrderStatus,
     })
     setOrders((prev) =>
       prev.map((o) =>
-        o.id === id
-          ? { ...o, status: "rechazado", modifiedAt: new Date(), tracking: [...o.tracking, trackingEntry] }
-          : o
+        o.id === id ? { ...o, status: "rechazado", estado: "rechazado" } : o
       )
     )
   }

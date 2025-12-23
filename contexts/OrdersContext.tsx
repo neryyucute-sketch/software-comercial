@@ -2,6 +2,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import type { Table } from "dexie";
 import { db } from "@/lib/db";
 import type { Order, OrderItem, OrderStatus } from "@/lib/types";
 import { syncOrderToServer, getCachedOrders } from "@/services/orders";
@@ -14,6 +15,12 @@ type OrdersContextType = {
   cancelOrder: (localId: string) => Promise<void>;
   syncOrders: () => Promise<void>;
   loadOrdersFromDB: () => Promise<void>;
+};
+
+type StoredOrder = Omit<Order, "id"> & {
+  id?: number | string; // Dexie primary key (auto) or fallback string
+  status?: OrderStatus; // legacy field indexed in Dexie
+  lastError?: string | null;
 };
 
 const OrdersContext = createContext<OrdersContextType | null>(null);
@@ -51,14 +58,18 @@ async function registerBGSync() {
 }
 
 export function OrdersProvider({ children }: { children: React.ReactNode }) {
+  const ordersTable = db.orders as unknown as Table<StoredOrder, number>;
   const [orders, setOrders] = useState<Order[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadOrdersFromDB = useCallback(async () => {
-    const data = await getCachedOrders();
+    const data = (await getCachedOrders()) as unknown as StoredOrder[];
     const normalized = data.map((order) => {
-      if (!Array.isArray(order.items) || order.items.length === 0) return order;
+      if (!Array.isArray(order.items) || order.items.length === 0) {
+        const id = typeof order.id === "string" ? order.id : order.localId ?? String(order.serverId ?? order.createdAt ?? "");
+        return { ...order, id } as Order;
+      }
       const sortedItems = [...order.items].sort((a, b) => {
         const aNum = a?.lineNumber ?? Number.POSITIVE_INFINITY;
         const bNum = b?.lineNumber ?? Number.POSITIVE_INFINITY;
@@ -67,7 +78,8 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
         if (Number.isFinite(bNum)) return 1;
         return 0;
       });
-      return { ...order, items: sortedItems } as Order;
+      const id = typeof order.id === "string" ? order.id : order.localId ?? String(order.serverId ?? order.createdAt ?? "");
+      return { ...order, id, items: sortedItems } as Order;
     });
     // Mostrar primero los más recientes
     normalized.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -97,16 +109,20 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
     const discount = o.discount ? Math.max(0, Math.min(100, o.discount)) : 0;
     const total = Math.round((sub * (1 - discount / 100)) * 100) / 100;
 
-    await db.transaction("rw", db.orders, async () => {
-      await db.orders.add({
-        ...o,
-        localId,
-        createdAt: now,
-        attempts: 0,
-        status: "ingresado" as OrderStatus,
-        synced: false,
-        total,
-      });
+    const stored: StoredOrder = {
+      ...o,
+      id: undefined,
+      localId,
+      createdAt: now,
+      attempts: 0,
+      status: "ingresado" as OrderStatus,
+      estado: o.estado ?? "ingresado",
+      synced: false,
+      total,
+    };
+
+    await db.transaction("rw", ordersTable, async () => {
+      await ordersTable.add(stored);
     });
 
     await loadOrdersFromDB();
@@ -115,14 +131,16 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
 
   const cancelOrder: OrdersContextType["cancelOrder"] = async (localId) => {
     setError(null);
-    const row = await db.orders.where("localId").equals(localId).first();
-    if (!row) return;
+    const row = (await ordersTable.where("localId").equals(localId).first()) as StoredOrder | undefined;
+    if (!row || row.id === undefined || row.id === null) return;
+    const key = typeof row.id === "number" ? row.id : Number(row.id);
+    if (!Number.isFinite(key)) return;
     // “Cancelar” localmente si aún no se envió
     if (!row.synced) {
-      await db.orders.delete(row.id!);
+      await ordersTable.delete(key);
     } else {
       // Si ya se envió podrías llamar a backend para anular (no implementado aquí)
-      await db.orders.update(row.id!, { status: "failed" as OrderStatus, lastError: "Cancelación no implementada" });
+      await ordersTable.update(key, { estado: "failed" as OrderStatus, status: "failed" as OrderStatus, lastError: "Cancelación no implementada" });
     }
     await loadOrdersFromDB();
   };
@@ -131,16 +149,28 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
     setSyncing(true);
     setError(null);
     try {
-      const pend = (await db.orders.toArray()).filter(o => !o.synced);
-      for (const o of pend) {
+      const pend = (await ordersTable.toArray()) as StoredOrder[];
+      const pending = pend.filter(o => !o.synced);
+      for (const o of pending) {
         // evitar ráfagas
         if ((o.attempts ?? 0) > 6) continue;
 
-        await db.orders.update(o.id!, { status: "sending" as OrderStatus, attempts: (o.attempts ?? 0) + 1 });
+        const keyRaw = o.id;
+        if (keyRaw === undefined || keyRaw === null) continue;
+        const key = typeof keyRaw === "number" ? keyRaw : Number(keyRaw);
+        if (!Number.isFinite(key)) continue;
 
-        const res = await syncOrderToServer(o);
+        await ordersTable.update(key, { estado: "sending" as OrderStatus, status: "sending" as OrderStatus, attempts: (o.attempts ?? 0) + 1 });
+
+        const sendable: Order = {
+          ...o,
+          id: typeof o.id === "string" ? o.id : o.localId ?? String(o.serverId ?? o.createdAt ?? ""),
+        };
+
+        const res = await syncOrderToServer(sendable);
         if (res.ok) {
-          await db.orders.update(o.id!, {
+          await ordersTable.update(key, {
+            estado: "sent" as OrderStatus,
             status: "sent" as OrderStatus,
             synced: true,
             serverId: res.serverId ?? null,
@@ -148,7 +178,7 @@ export function OrdersProvider({ children }: { children: React.ReactNode }) {
           });
         } else {
           const err = res.error ?? "error desconocido";
-          await db.orders.update(o.id!, { status: "failed" as OrderStatus, lastError: err });
+          await ordersTable.update(key, { estado: "failed" as OrderStatus, status: "failed" as OrderStatus, lastError: err });
           // backoff simple por pedido (no bloquear todo)
           await new Promise((r) => setTimeout(r, Math.min(30000, 1000 * Math.pow(2, o.attempts ?? 0))));
         }

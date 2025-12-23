@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { getCachedVendedorRestriccion, syncVendedorRestriccion } from "@/services/vendedorRestriccion";
-import { VendedorRestriccion } from "@/types/types";
+import type { VendedorRestriccion } from "@/lib/types";
 
 // 👇 1. Crear contexto con el tipo de datos
 type VendedorRestriccionContextType = {

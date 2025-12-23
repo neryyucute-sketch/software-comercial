@@ -35,16 +35,25 @@ export function ComboConfigModal({
   const percent = Math.min(100, (selected / Math.max(1, required)) * 100)
 
   const optional = useMemo(() => {
+    const getId = (p: any) => p.id ?? p.idt ?? ""
+    const getCategory = (p: any) => p.category ?? p.categoria ?? p.linea ?? p.familia ?? p.codigoLinea
+
     let opt: Product[] = []
     if (combo.optionalProductLines?.length) {
-      opt = products.filter((p) => p.isActive && combo.optionalProductLines.includes(p.category))
+      opt = products.filter((p: any) => p.isActive !== false && combo.optionalProductLines.includes(getCategory(p)))
     }
     if (combo.optionalProductIds?.length) {
-      const specific = products.filter((p) => p.isActive && combo.optionalProductIds!.includes(p.id))
+      const specific = products.filter((p: any) => p.isActive !== false && combo.optionalProductIds!.includes(getId(p)))
       opt = [...opt, ...specific]
     }
     const seen = new Set<string>()
-    return opt.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
+    return opt.filter((p: any) => {
+      const pid = getId(p)
+      if (!pid) return false
+      if (seen.has(pid)) return false
+      seen.add(pid)
+      return true
+    }) as Product[]
   }, [combo, products])
 
   return (
@@ -135,11 +144,11 @@ export function ComboConfigModal({
                   <div className="text-sm text-gray-500">No hay productos fijos</div>
                 ) : (
                   combo.fixedProducts.map((fp) => {
-                    const p = products.find((x) => x.id === fp.productId)
+                    const p = products.find((x: any) => (x.id ?? x.idt) === fp.productId)
                     const totalQty = fp.quantity * quantity
                     return (
                       <div key={fp.productId} className="flex items-center justify-between p-2 bg-gray-50 rounded border">
-                        <span className="text-sm">{p?.name}</span>
+                        <span className="text-sm">{(p as any)?.name || (p as any)?.descripcion}</span>
                         <span className="text-sm font-medium">
                           x{totalQty}{quantity > 1 ? ` (${fp.quantity}×${quantity})` : ""}
                         </span>
@@ -179,18 +188,21 @@ export function ComboConfigModal({
                       No hay productos opcionales disponibles
                     </div>
                   ) : (
-                    optional.map((p) => {
-                      const sel = selectedProducts.find((x) => x.productId === p.id)
+                    optional.map((p: any) => {
+                      const pid = p.id ?? p.idt ?? ""
+                      const name = p.name ?? p.descripcion ?? "Producto"
+                      const sel = selectedProducts.find((x) => x.productId === pid)
                       const qty = sel?.quantity || 0
+                      if (!pid) return null
                       return (
-                        <div key={p.id} className="flex items-center justify-between p-2 border rounded">
-                          <span className="text-sm">{p.name}</span>
+                        <div key={pid} className="flex items-center justify-between p-2 border rounded">
+                          <span className="text-sm">{name}</span>
                           <div className="flex items-center gap-2">
                             <Button
                               type="button"
                               variant="outline"
                               size="sm"
-                              onClick={() => onChangeSelected(p.id, Math.max(0, qty - 1))}
+                              onClick={() => onChangeSelected(pid, Math.max(0, qty - 1))}
                               disabled={qty <= 0}
                               aria-label={`Quitar ${p.name}`}
                             >
@@ -201,7 +213,7 @@ export function ComboConfigModal({
                               type="button"
                               variant="outline"
                               size="sm"
-                              onClick={() => onChangeSelected(p.id, qty + 1)}
+                              onClick={() => onChangeSelected(pid, qty + 1)}
                               aria-label={`Agregar ${p.name}`}
                             >
                               <Plus className="w-3 h-3" />

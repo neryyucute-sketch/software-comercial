@@ -10,9 +10,42 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ModernDatePicker } from "@/components/ui/modern-date-picker"
 import { usePreventa } from "@/contexts/preventa-context"
-import { useAuth } from "@/contexts/AuthContext"
 import { X, Plus, Minus, Check } from "lucide-react"
 import type { Combo, ComboProduct } from "@/lib/types"
+
+type ProductLite = {
+  id?: string
+  name?: string
+  price?: number
+  isActive?: boolean
+  category?: string
+}
+
+type CustomerLite = {
+  id?: string
+  code?: string
+  name?: string
+  email?: string
+  phone?: string
+  address?: string
+  nit?: string
+  razonSocial?: string
+  channel?: string
+  region?: string
+  route?: string
+}
+
+type VendorLite = {
+  idt?: string | number
+  codigo?: string
+  primer_nombre?: string
+  primer_apellido?: string
+  numero_ruta?: string
+  telefono?: string
+  correo?: string
+  es_supervisor?: boolean
+  activo?: boolean
+}
 
 interface ComboFormProps {
   combo?: Combo | null
@@ -20,8 +53,12 @@ interface ComboFormProps {
 }
 
 export function ComboForm({ combo, onClose }: ComboFormProps) {
-  const { addCombo, updateCombo, products, customers, vendors } = usePreventa()
-  const { users } = useAuth()
+  const preventa = usePreventa() as any
+  const addCombo = preventa?.addCombo ?? (() => {})
+  const updateCombo = preventa?.updateCombo ?? (() => {})
+  const products: ProductLite[] = (preventa?.products as ProductLite[] | undefined) ?? []
+  const customers: CustomerLite[] = (preventa?.customers as CustomerLite[] | undefined) ?? []
+  const vendors: VendorLite[] = (preventa?.vendors as VendorLite[] | undefined) ?? (preventa?.vendedor || [])
 
   const [formData, setFormData] = useState({
     name: combo?.name || "",
@@ -32,11 +69,11 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
     optionalProductLines: combo?.optionalProductLines || [],
     optionalProductIds: combo?.optionalProductIds || [],
     restrictions: {
-      regions: combo?.restrictions.regions || [],
-      vendorIds: combo?.restrictions.vendorIds || [],
+      regions: combo?.restrictions.regions?.map((r) => String(r)) || [],
+      vendorIds: combo?.restrictions.vendorIds?.map((id) => String(id)) || [],
       customerCriteria: {
-        channels: combo?.restrictions.customerCriteria?.channels || [],
-        codes: combo?.restrictions.customerCriteria?.codes || [],
+        channels: combo?.restrictions.customerCriteria?.channels?.map((c) => String(c)) || [],
+        codes: combo?.restrictions.customerCriteria?.codes?.map((c) => String(c)) || [],
       },
     },
     isActive: combo?.isActive ?? true,
@@ -205,10 +242,16 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
     }))
   }
 
-  const activeProducts = products?.filter((p) => p.isActive) || []
-  const categories = [...new Set(activeProducts.map((p) => p.category).filter(Boolean))]
-  const regions = [...new Set((customers || []).map((c) => c.region).filter(Boolean))]
-  const channels = [...new Set((customers || []).map((c) => c.channel).filter(Boolean))]
+  const activeProducts = products.filter((p) => p?.isActive)
+  const categories = [
+    ...new Set(activeProducts.map((p) => p.category).filter((category): category is string => Boolean(category?.trim()))),
+  ]
+  const regions = [
+    ...new Set(customers.map((c) => c.region).filter((region): region is string => Boolean(region?.trim()))),
+  ]
+  const channels = [
+    ...new Set(customers.map((c) => c.channel).filter((channel): channel is string => Boolean(channel?.trim()))),
+  ]
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -395,20 +438,26 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                   <Label>O Productos Específicos Opcionales</Label>
                   <Card className="p-4 max-h-60 overflow-y-auto">
                     <div className="space-y-2">
-                      {activeProducts.map((product) => (
-                        <div key={`optional-product-${product.id}`} className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            id={`optional-${product.id}`}
-                            checked={formData.optionalProductIds?.includes(product.id) || false}
-                            onChange={() => toggleOptionalProduct(product.id)}
-                            className="rounded border-gray-300"
-                          />
-                          <label htmlFor={`optional-${product.id}`} className="flex-1 text-sm">
-                            {product.name} - Q{product.price.toLocaleString()}
-                          </label>
-                        </div>
-                      ))}
+                      {activeProducts.map((product) => {
+                        const productId = product.id ?? ""
+                        if (!productId) return null
+                        const productName = product.name ?? "Producto"
+                        const productPrice = product.price ?? 0
+                        return (
+                          <div key={`optional-product-${productId}`} className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              id={`optional-${productId}`}
+                              checked={formData.optionalProductIds?.includes(productId) || false}
+                              onChange={() => toggleOptionalProduct(productId)}
+                              className="rounded border-gray-300"
+                            />
+                            <label htmlFor={`optional-${productId}`} className="flex-1 text-sm">
+                              {productName} - Q{productPrice.toLocaleString()}
+                            </label>
+                          </div>
+                        )
+                      })}
                     </div>
                   </Card>
                   <p className="text-xs text-gray-500">Productos específicos que el cliente puede elegir</p>
@@ -482,7 +531,7 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                       </p>
                       <div className="space-y-2">
                         {formData.restrictions.vendorIds.map((vendorId) => {
-                          const vendor = (vendors || []).find((v) => v.idt === vendorId)
+                          const vendor = vendors.find((v) => String(v.idt) === vendorId)
                           return vendor ? (
                             <div
                               key={vendorId}
@@ -516,29 +565,32 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                   )}
 
                   <div className="max-h-48 overflow-y-auto space-y-2">
-                    {(vendors || [])
+                    {vendors
                       .sort((a, b) => {
-                        const aSelected = formData.restrictions.vendorIds?.includes(a.idt) || false
-                        const bSelected = formData.restrictions.vendorIds?.includes(b.idt) || false
+                        const aId = String(a.idt ?? "")
+                        const bId = String(b.idt ?? "")
+                        const aSelected = formData.restrictions.vendorIds.includes(aId)
+                        const bSelected = formData.restrictions.vendorIds.includes(bId)
                         if (aSelected && !bSelected) return -1
                         if (!aSelected && bSelected) return 1
                         return 0
                       })
                       .filter((vendor) => {
-                        if (!vendor || !vendor.primer_nombre || !vendor.primer_apellido) return false
                         const searchLower = vendorSearch.toLowerCase()
+                        const firstName = vendor.primer_nombre?.toLowerCase() || ""
+                        const lastName = vendor.primer_apellido?.toLowerCase() || ""
+                        const route = vendor.numero_ruta?.toLowerCase() || ""
                         return (
-                          vendor.activo &&
-                          (vendor.primer_nombre.toLowerCase().includes(searchLower) ||
-                            vendor.primer_apellido.toLowerCase().includes(searchLower) ||
-                            (vendor.numero_ruta && vendor.numero_ruta.toLowerCase().includes(searchLower)))
+                          !!vendor.activo &&
+                          (firstName.includes(searchLower) || lastName.includes(searchLower) || route.includes(searchLower))
                         )
                       })
                       .map((vendor) => {
-                        const isSelected = formData.restrictions.vendorIds?.includes(vendor.idt) || false
+                        const vendorId = String(vendor.idt ?? "")
+                        const isSelected = formData.restrictions.vendorIds.includes(vendorId)
                         return (
                           <div
-                            key={vendor.idt}
+                            key={vendorId}
                             className={`flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 ${
                               isSelected ? "border-blue-500 bg-blue-50" : ""
                             }`}
@@ -546,25 +598,25 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                             <div className="flex items-center space-x-3">
                               <input
                                 type="checkbox"
-                                id={`vendor-${vendor.idt}`}
+                                id={`vendor-${vendorId}`}
                                 checked={isSelected}
                                 onChange={(e) => {
                                   if (e.target.checked) {
                                     handleChange("restrictions", {
                                       ...formData.restrictions,
-                                      vendorIds: [...formData.restrictions.vendorIds, vendor.idt],
+                                      vendorIds: [...formData.restrictions.vendorIds, vendorId],
                                     })
                                   } else {
                                     handleChange("restrictions", {
                                       ...formData.restrictions,
-                                      vendorIds: formData.restrictions.vendorIds.filter((id) => id !== vendor.idt),
+                                      vendorIds: formData.restrictions.vendorIds.filter((id) => id !== vendorId),
                                     })
                                   }
                                 }}
                                 className="rounded border-gray-300"
                               />
                               <div>
-                                <label htmlFor={`vendor-${vendor.idt}`} className="font-medium">
+                                <label htmlFor={`vendor-${vendorId}`} className="font-medium">
                                   {vendor.codigo} - {vendor.primer_nombre} {vendor.primer_apellido}
                                 </label>
                                 <p className="text-sm text-gray-500">
@@ -653,7 +705,7 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                       <Label className="text-sm font-medium">Canales de cliente permitidos:</Label>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-2">
                         {channels
-                          .filter((channel) => channel && channel.trim())
+                          .filter((channel): channel is string => Boolean(channel && channel.trim()))
                           .map((channel) => (
                             <div key={`channel-${channel}`} className="flex items-center space-x-2">
                               <input
@@ -710,9 +762,8 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
 
                         {customerCodeSearch && (
                           <div className="max-h-48 overflow-y-auto border rounded-lg">
-                            {(customers || [])
+                            {customers
                               .filter((customer) => {
-                                if (!customer) return false
                                 const searchLower = customerCodeSearch.toLowerCase()
                                 return (
                                   (customer.code && customer.code.toLowerCase().includes(searchLower)) ||
@@ -728,10 +779,11 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                               })
                               .slice(0, 10)
                               .map((customer) => {
-                                const isSelected = formData.restrictions.customerCriteria.codes.includes(customer.code)
+                                const code = customer.code ?? ""
+                                const isSelected = formData.restrictions.customerCriteria.codes.includes(code)
                                 return (
                                   <div
-                                    key={customer.id}
+                                    key={customer.id || code}
                                     className={`p-3 border-b last:border-b-0 hover:bg-gray-50 cursor-pointer ${
                                       isSelected ? "bg-green-50 border-green-200" : ""
                                     }`}
@@ -742,7 +794,7 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                                           customerCriteria: {
                                             ...formData.restrictions.customerCriteria,
                                             codes: formData.restrictions.customerCriteria.codes.filter(
-                                              (code) => code !== customer.code,
+                                              (c) => c !== code,
                                             ),
                                           },
                                         })
@@ -751,7 +803,7 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                                           ...formData.restrictions,
                                           customerCriteria: {
                                             ...formData.restrictions.customerCriteria,
-                                            codes: [...formData.restrictions.customerCriteria.codes, customer.code],
+                                            codes: [...formData.restrictions.customerCriteria.codes, code],
                                           },
                                         })
                                       }
@@ -811,7 +863,7 @@ export function ComboForm({ combo, onClose }: ComboFormProps) {
                             </p>
                             <div className="flex flex-wrap gap-2">
                               {formData.restrictions.customerCriteria.codes.map((code) => {
-                                const customer = (customers || []).find((c) => c.code === code)
+                                const customer = customers.find((c) => c.code === code)
                                 return (
                                   <div
                                     key={code}

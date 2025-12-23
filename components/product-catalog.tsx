@@ -7,8 +7,22 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-import type { CodimisaProduct } from "@/lib/types";
-import { codimisaProducts as localMock } from "@/lib/products.mock";
+type CodimisaProduct = {
+  descripcion?: string;
+  descripcion_corta?: string;
+  codigo_producto?: string;
+  codigo_fabricante?: string;
+  proveedor?: string;
+  categoria?: string;
+  familia?: string;
+  subfamilia?: string;
+  presentacion?: string;
+  price?: number;
+  stock?: number;
+  isActive?: boolean;
+};
+
+const localMock: CodimisaProduct[] = [];
 
 export default function ProductsPage() {
   const [items, setItems] = useState<CodimisaProduct[]>(localMock);

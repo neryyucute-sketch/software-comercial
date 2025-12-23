@@ -9,9 +9,52 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePreventa } from "@/contexts/preventa-context"
 import { X } from "lucide-react"
-import type { Customer } from "@/lib/types"
-import { sampleRegions } from "@/lib/sample-data"
 import { z } from "zod"
+
+type CustomerLite = {
+  idt?: string
+  codigoCliente?: string
+  nombreCliente?: string
+  nit?: string
+  telefono?: string
+  correo?: string
+  direccion?: string
+  rutaVenta?: string
+  canalVenta?: string
+  subCanalVenta?: string
+  updatedAt?: string
+  // Campos usados por esta UI
+  name?: string
+  email?: string
+  phone?: string
+  address?: string
+  code?: string
+  businessName?: string
+  tradeName?: string
+  contact?: string
+  vendorId?: string | number
+  region?: string
+  department?: string
+  municipality?: string
+  channel?: string
+}
+
+type RegionOption = { id: string; name: string }
+
+type VendorOption = {
+  idt?: string | number
+  codigo?: string
+  primer_nombre?: string
+  primer_apellido?: string
+}
+
+const sampleRegions: RegionOption[] = [
+  { id: "1", name: "Metropolitana" },
+  { id: "2", name: "Norte" },
+  { id: "3", name: "Sur" },
+  { id: "4", name: "Oriente" },
+  { id: "5", name: "Occidente" },
+]
 
 // 🔒 Seguridad: Validación robusta con Zod
 const customerSchema = z.object({
@@ -34,28 +77,29 @@ const customerSchema = z.object({
 const sampleChannels = ["Mayorista", "Minorista", "Distribuidor", "Farmacia", "Supermercado", "Tienda", "Bodega"]
 
 interface CustomerFormProps {
-  customer?: Customer | null
+  customer?: CustomerLite | null
   onClose: () => void
 }
 
 export function CustomerForm({ customer, onClose }: CustomerFormProps) {
-  const { addCustomer, updateCustomer, vendors } = usePreventa()
+  const { addCustomer, updateCustomer, vendedor } = usePreventa()
+  const vendors: VendorOption[] = (vendedor as unknown as VendorOption[]) || []
 
   const [formData, setFormData] = useState({
-    name: customer?.name || "",
-    email: customer?.email || "",
-    phone: customer?.phone || "",
-    address: customer?.address || "",
-    code: customer?.code || "",
+    name: customer?.name || customer?.nombreCliente || "",
+    email: customer?.email || customer?.correo || "",
+    phone: customer?.phone || customer?.telefono || "",
+    address: customer?.address || customer?.direccion || "",
+    code: customer?.code || customer?.codigoCliente || "",
     nit: customer?.nit || "",
     businessName: customer?.businessName || "",
     tradeName: customer?.tradeName || "",
     contact: customer?.contact || "",
     vendorId: String(customer?.vendorId || ""),
-    region: customer?.region || "",
+    region: customer?.region || customer?.rutaVenta || "",
     department: customer?.department || "",
     municipality: customer?.municipality || "",
-    channel: customer?.channel || "",
+    channel: customer?.channel || customer?.canalVenta || "",
   })
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -70,10 +114,22 @@ export function CustomerForm({ customer, onClose }: CustomerFormProps) {
       return
     }
 
-    if (customer) {
-      updateCustomer(customer.id, formData)
+    const payload = {
+      codigoCliente: formData.code,
+      nombreCliente: formData.name,
+      nit: formData.nit,
+      telefono: formData.phone,
+      correo: formData.email,
+      canalVenta: formData.channel,
+      rutaVenta: formData.region,
+      subCanalVenta: formData.tradeName,
+      updatedAt: new Date().toISOString(),
+    }
+
+    if (customer?.idt) {
+      updateCustomer(customer.idt, payload)
     } else {
-      addCustomer(formData)
+      addCustomer(payload)
     }
 
     onClose()
@@ -198,11 +254,15 @@ export function CustomerForm({ customer, onClose }: CustomerFormProps) {
                       <SelectValue placeholder="Seleccionar vendedor" />
                     </SelectTrigger>
                     <SelectContent>
-                      {vendors.map((vendor) => (
-                        <SelectItem key={vendor.idt} value={vendor.idt}>
-                          {vendor.codigo} - {vendor.primer_nombre} {vendor.primer_apellido}
-                        </SelectItem>
-                      ))}
+                      {vendors.map((vendor: VendorOption) => {
+                        const vendorId = String(vendor.idt ?? "")
+                        const code = vendor.codigo ?? ""; const first = vendor.primer_nombre ?? ""; const last = vendor.primer_apellido ?? ""
+                        return (
+                          <SelectItem key={vendorId} value={vendorId}>
+                            {code} - {first} {last}
+                          </SelectItem>
+                        )
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
@@ -214,7 +274,7 @@ export function CustomerForm({ customer, onClose }: CustomerFormProps) {
                       <SelectValue placeholder="Seleccionar región" />
                     </SelectTrigger>
                     <SelectContent>
-                      {sampleRegions.map((region) => (
+                      {sampleRegions.map((region: RegionOption) => (
                         <SelectItem key={region.id} value={region.name}>
                           {region.name}
                         </SelectItem>

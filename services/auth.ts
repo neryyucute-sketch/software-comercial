@@ -95,11 +95,11 @@ export async function clearTokens() {
 }
 
 /** 🔹 Refrescar token */
-async function refreshToken(refreshToken: string, retries = 3): Promise<Tokens> {
+async function refreshTokenWithRetry(refreshTokenValue: string, retries = 3): Promise<Tokens> {
   try {
     const res = await fetch(`${API_BASE}/auth/refresh`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${refreshToken}` },
+      headers: { Authorization: `Bearer ${refreshTokenValue}` },
     });
 
     const data = await res.json();
@@ -136,7 +136,7 @@ async function refreshToken(refreshToken: string, retries = 3): Promise<Tokens> 
     if (retries > 0 && !(error instanceof Error && error.message.includes("Sesión expirada"))) {
       console.warn(`Reintentando refresh token... (intentos restantes: ${retries})`);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      return refreshToken(refreshToken, retries - 1);
+      return refreshTokenWithRetry(String(refreshTokenValue), retries - 1);
     }
     throw error;
   }
@@ -150,7 +150,7 @@ export async function getAccessToken(): Promise<string> {
   }
 
   if (Date.now() >= tokens.expiresAt) {
-    tokens = await refreshToken(tokens.refreshToken);
+    tokens = await refreshTokenWithRetry(tokens.refreshToken);
   }
 
   return tokens.accessToken;

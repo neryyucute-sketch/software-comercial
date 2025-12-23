@@ -875,7 +875,7 @@ function calculateBonus(offer: OfferDef, applicableItems: OrderItem[], productos
     if (familiaId) familiasSet.add(String(familiaId));
 
     const candidate = productos.find((p) => {
-      const lineaVal = String(p.codigoLinea ?? p.codigoFiltroVenta ?? p.lineaVenta ?? '');
+      const lineaVal = String(p.codigoLinea ?? p.codigoFiltroVenta ?? '');
       const famVal = String(p.codigoFamilia ?? p.familia ?? '');
       const lineaMatch = lineasSet.size ? Array.from(lineasSet).some((id) => lineaVal === id || lineaVal.includes(id)) : false;
       const famMatch = familiasSet.size ? Array.from(familiasSet).some((id) => famVal === id || famVal.includes(id)) : false;
