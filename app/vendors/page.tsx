@@ -54,7 +54,7 @@ export default function VendorsPage() {
     )
   }
 
-  const filteredVendors = vendors.filter(
+  const filteredVendors = (vendors ?? []).filter(
     (vendor) =>
       vendor.primer_nombre.toLowerCase().includes(searchTerm.toLowerCase()) ||
       vendor.primer_apellido.toLowerCase().includes(searchTerm.toLowerCase()) ||

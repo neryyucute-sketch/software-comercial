@@ -32,7 +32,7 @@ import OrderPhotos from "./OrderPhotos";
 import { db } from "@/lib/db";
 import { useToast } from "@/hooks/use-toast";
 import { groupOrderComboItems, resolveComboGroupQuantity, resolveComboGroupUnitPrice, prepareOrderItemsForPersistence, type OrderComboGroup } from "@/lib/order-helpers";
-import { pickReferenceCode } from "@/lib/utils";
+import { pickReferenceCode, formatCurrencyQ } from "@/lib/utils";
 
 function extractDiscountConfig(offer: OfferDef) {
   const discountConfig = offer.discount || (offer as any).discountConfig;
@@ -52,6 +52,19 @@ function extractDiscountConfig(offer: OfferDef) {
 // Aplica todas las ofertas acumulando porcentajes y montos en los ítems que correspondan
 function applyOffersSequence(baseItems: OrderItem[], offers: ApplicableOffer[]) {
   const working: OrderItem[] = baseItems.map((it) => {
+    if (it.esBonificacion) {
+      const baseGross = Math.max(it.subtotalSinDescuento ?? 0, it.subtotal ?? 0, it.cantidad * it.precioUnitario);
+      const net = it.subtotal ?? baseGross;
+      const discount = it.descuentoLinea ?? Math.max(0, baseGross - net);
+      return {
+        ...it,
+        subtotalSinDescuento: baseGross,
+        subtotal: net,
+        total: it.total ?? net,
+        descuentoLinea: discount,
+      } as OrderItem;
+    }
+
     const baseGross = Math.max(it.cantidad * it.precioUnitario, it.subtotalSinDescuento ?? 0, it.subtotal ?? 0);
     return {
       ...it,
@@ -66,14 +79,25 @@ function applyOffersSequence(baseItems: OrderItem[], offers: ApplicableOffer[]) 
 
   const perOfferDiscount = new Map<string, number>();
 
+  const resolvePctFixed = (offer: OfferDef, qty: number) => {
+    const discountConfig = offer.discount || (offer as any).discountConfig || {};
+    const { pct: pctBase, fixed: fixedBase } = extractDiscountConfig(offer);
+    const tiers = parseTiers(discountConfig);
+    const tier = pickTierForQty(tiers, qty);
+    const pct = tier?.percent ?? pctBase;
+    const fixed = tier?.amount ?? fixedBase;
+    return { pct, fixed };
+  };
+
   for (const offer of offers) {
-    const { pct, fixed } = extractDiscountConfig(offer.offer);
-    const applicableIds = new Set((offer.applicableItems || []).map((it) => it.productoId));
+    const applicableIds = new Set((offer.applicableItems || []).map((it) => String(it.productoId)));
 
     let offerDisc = 0;
 
     working.forEach((it) => {
-      if (!applicableIds.has(it.productoId)) return;
+      if (it.esBonificacion) return;
+      if (!applicableIds.has(String(it.productoId))) return;
+      const { pct, fixed } = resolvePctFixed(offer.offer, Number(it.cantidad || 0));
       const base = Math.max(it.subtotalSinDescuento ?? 0, it.subtotal ?? 0, it.cantidad * it.precioUnitario);
       let lineDisc = 0;
       if (pct !== undefined && !isNaN(pct)) {
@@ -90,25 +114,27 @@ function applyOffersSequence(baseItems: OrderItem[], offers: ApplicableOffer[]) 
   }
 
   const discounted = working.map((it) => {
+    if (it.esBonificacion) {
+      return it;
+    }
+
     const base = Math.max(it.subtotalSinDescuento ?? 0, it.subtotal ?? 0, it.cantidad * it.precioUnitario);
-    let pctSum = 0;
-    let fixedSum = 0;
+    let lineDiscTotal = 0;
 
     offers.forEach((offer) => {
-      const applicableIds = new Set((offer.applicableItems || []).map((ai) => ai.productoId));
-      if (!applicableIds.has(it.productoId)) return;
-      const { pct, fixed } = extractDiscountConfig(offer.offer);
-      if (pct !== undefined && !isNaN(pct)) pctSum += pct;
-      if (fixed !== undefined && !isNaN(fixed)) fixedSum += fixed;
+      const applicableIds = new Set((offer.applicableItems || []).map((ai) => String(ai.productoId)));
+      if (!applicableIds.has(String(it.productoId))) return;
+      const { pct, fixed } = resolvePctFixed(offer.offer, Number(it.cantidad || 0));
+      const pctPart = pct !== undefined && !isNaN(pct) ? (base * pct) / 100 : 0;
+      const fixedPart = fixed !== undefined && !isNaN(fixed) ? Math.max(0, fixed) * it.cantidad : 0;
+      lineDiscTotal += pctPart + fixedPart;
     });
 
-    const pctTotal = Math.min(100, Math.max(0, pctSum));
-    const lineDisc = (base * pctTotal) / 100 + Math.max(0, fixedSum) * it.cantidad;
-    const net = Math.max(0, base - lineDisc);
+    const net = Math.max(0, base - lineDiscTotal);
     return {
       ...it,
       subtotalSinDescuento: base,
-      descuentoLinea: lineDisc,
+    descuentoLinea: lineDiscTotal,
       subtotal: net,
       total: net,
     } as OrderItem;
@@ -145,24 +171,48 @@ function toggleOffer(app: ApplicableOffer, current: ApplicableOffer[]) {
   return [...current, app];
 }
 
+function normalizeCode(value: any): string {
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  // Remover ceros a la izquierda para que "0002" coincida con "2"
+  const noLeading = s.replace(/^0+/, "");
+  return noLeading.length ? noLeading : "0";
+}
+
 function itemMatchesOffer(item: OrderItem, offer: OfferDef, productsAll: Product[]): boolean {
-  const producto = productsAll.find((p) => String(p.codigoProducto) === String(item.productoId));
+  const producto = productsAll.find((p) => normalizeCode(p.codigoProducto) === normalizeCode(item.productoId));
   const scope = offer.scope || {};
 
-  if (offer.products?.length && offer.products.includes(item.productoId)) return true;
-  if (scope.codigosProducto?.length && scope.codigosProducto.includes(item.productoId)) return true;
+  const pid = normalizeCode(item.productoId);
+  const offerProducts = (offer.products || []).map((v) => normalizeCode(v));
+  const scopeProducts = (scope.codigosProducto || []).map((v: any) => normalizeCode(v));
+
+  if (offerProducts.length && offerProducts.includes(pid)) return true;
+  if (scopeProducts.length && scopeProducts.includes(pid)) return true;
 
   if (!producto) return false;
 
-  const proveedor = String(producto.codigoProveedor ?? "");
-  const familia = String(producto.codigoFamilia ?? producto.familia ?? "");
-  const subfamilia = String(producto.codigoSubfamilia ?? producto.subfamilia ?? "");
-  const linea = String(producto.codigoLinea ?? producto.codigoFiltroVenta ?? (producto as any).lineaVenta ?? producto.linea ?? "");
+  const proveedor = normalizeCode(producto.codigoProveedor);
+  const familia = normalizeCode(producto.codigoFamilia ?? producto.familia);
+  const subfamilia = normalizeCode(producto.codigoSubfamilia ?? producto.subfamilia);
+  const linea = normalizeCode(producto.codigoLinea ?? producto.codigoFiltroVenta ?? (producto as any).lineaVenta ?? producto.linea);
 
-  if (scope.codigosProveedor?.length && scope.codigosProveedor.includes(proveedor)) return true;
-  if (scope.codigosFamilia?.length && scope.codigosFamilia.includes(familia)) return true;
-  if (scope.codigosSubfamilia?.length && scope.codigosSubfamilia.includes(subfamilia)) return true;
-  if (scope.codigosLinea?.length && scope.codigosLinea.includes(linea)) return true;
+  // Aceptar coincidencias tanto en scope.codigos* como en campos top-level de la oferta
+  const scopeProveedores = (scope.codigosProveedor || []).map((v: any) => normalizeCode(v));
+  const scopeFamilias = (scope.codigosFamilia || []).map((v: any) => normalizeCode(v));
+  const scopeSubfamilias = (scope.codigosSubfamilia || []).map((v: any) => normalizeCode(v));
+  const scopeLineas = (scope.codigosLinea || []).map((v: any) => normalizeCode(v));
+
+  const offerProveedores = (offer as any).proveedores ? (offer as any).proveedores.map((v: any) => normalizeCode(v)) : [];
+  const offerFamilias = (offer as any).familias ? (offer as any).familias.map((v: any) => normalizeCode(v)) : [];
+  const offerSubfamilias = (offer as any).subfamilias ? (offer as any).subfamilias.map((v: any) => normalizeCode(v)) : [];
+  const offerLineas = (offer as any).codigosLinea ? (offer as any).codigosLinea.map((v: any) => normalizeCode(v)) : [];
+
+  const lineCodes = [...scopeLineas, ...offerLineas, ...offerSubfamilias];
+  if ([...scopeProveedores, ...offerProveedores].includes(proveedor)) return true;
+  if ([...scopeFamilias, ...offerFamilias].includes(familia)) return true;
+  if ([...scopeSubfamilias, ...offerSubfamilias].includes(subfamilia)) return true;
+  if (lineCodes.includes(linea)) return true;
 
   return false;
 }
@@ -835,6 +885,37 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
     return output;
   }, [customer, customerDetails, allOffers, companyCode]);
 
+  const resolveBonusUnitPrice = useCallback(
+    (pid: string, prod?: Product) => {
+      const negotiated = negotiatedPriceMap[pid];
+      if (negotiated && Number.isFinite(Number(negotiated.price))) {
+        const price = Number(negotiated.price);
+        return {
+          price,
+          priceSource: "negotiated" as OrderItem["priceSource"],
+          priceListName: negotiated.offerName ?? "Precio negociado",
+          priceListCode: negotiated.offerCode ?? undefined,
+          priceOfferId: negotiated.offerId,
+          priceOfferCode: negotiated.offerCode ?? null,
+          priceOfferName: negotiated.offerName ?? "Precio negociado",
+        };
+      }
+
+      const base = Number(prod?.precio ?? 0);
+      const price = Number.isFinite(base) ? base : 0;
+      return {
+        price,
+        priceSource: "base" as OrderItem["priceSource"],
+        priceListName: prod && prod.descripcion ? undefined : undefined,
+        priceListCode: undefined,
+        priceOfferId: undefined,
+        priceOfferCode: undefined,
+        priceOfferName: undefined,
+      };
+    },
+    [negotiatedPriceMap]
+  );
+
   useEffect(() => {
     if (!customer) return;
     if (!items.length) return;
@@ -1364,27 +1445,43 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         const famIds: string[] = (target as any).familiaIds?.map(String) || [];
         const provIds: string[] = (target as any).proveedorIds?.map(String) || [];
 
+        const normalizeCode = (value: unknown): string => {
+          const raw = String(value ?? "").trim();
+          if (!raw) return "";
+          if (/^-?\d+$/.test(raw)) {
+            return String(parseInt(raw, 10));
+          }
+          return raw.toUpperCase();
+        };
+
+        const normalizedLineaIds = lineaIds.map(normalizeCode).filter(Boolean);
+        const normalizedFamIds = famIds.map(normalizeCode).filter(Boolean);
+        const normalizedProvIds = provIds.map(normalizeCode).filter(Boolean);
+        const fallbackLineaId = normalizeCode((target as any).lineaId);
+        const fallbackFamId = normalizeCode((target as any).familiaId);
+        const fallbackProvId = normalizeCode((target as any).proveedorId);
+
         const options = productosAll.filter((p) => {
-          const lineaVal = String(p.codigoLinea ?? p.codigoFiltroVenta ?? (p as any).lineaVenta ?? "");
-          const famVal = String(p.codigoFamilia ?? p.familia ?? "");
-          const provVal = String((p as any).codigoProveedor ?? "");
+          const lineaVal = normalizeCode(p.codigoLinea ?? p.codigoFiltroVenta ?? (p as any)?.lineaVenta);
+          const famVal = normalizeCode(p.codigoFamilia ?? p.familia);
+          const provVal = normalizeCode((p as any)?.codigoProveedor ?? (p as any)?.proveedorId);
 
-          const lineaMatch = lineaIds.length
-            ? lineaIds.some((id) => lineaVal === id || lineaVal.includes(id))
-            : target.lineaId
-              ? (lineaVal === String(target.lineaId) || lineaVal.includes(String(target.lineaId)))
+          const lineaMatch = normalizedLineaIds.length
+            ? normalizedLineaIds.includes(lineaVal)
+            : fallbackLineaId
+              ? lineaVal === fallbackLineaId
               : false;
 
-          const famMatch = famIds.length
-            ? famIds.some((id) => famVal === id || famVal.includes(id))
-            : target.familiaId
-              ? (famVal === String(target.familiaId) || famVal.includes(String(target.familiaId)))
+          const famMatch = normalizedFamIds.length
+            ? normalizedFamIds.includes(famVal)
+            : fallbackFamId
+              ? famVal === fallbackFamId
               : false;
 
-          const provMatch = provIds.length
-            ? provIds.some((id) => provVal === id || provVal.includes(id))
-            : (target as any).proveedorId
-              ? (provVal === String((target as any).proveedorId) || provVal.includes(String((target as any).proveedorId)))
+          const provMatch = normalizedProvIds.length
+            ? normalizedProvIds.includes(provVal)
+            : fallbackProvId
+              ? provVal === fallbackProvId
               : false;
 
           return lineaMatch || famMatch || provMatch;
@@ -1405,7 +1502,8 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
         if (!targetPid) return;
         const prod = productosAll.find((p) => String(p.codigoProducto) === String(targetPid));
         const qty = ap.bonusQty;
-        const price = prod?.precio ?? 0;
+        const priceInfo = resolveBonusUnitPrice(String(targetPid), prod);
+        const price = priceInfo.price;
         const bruto = Math.round(price * qty * 100) / 100;
         const codigoProveedor = prod?.codigoProveedor != null ? String(prod.codigoProveedor) : undefined;
         const nombreProveedor = prod?.proveedor ?? undefined;
@@ -1440,6 +1538,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
           tipoOferta: "bonus",
           ofertaCodigo: offerCode ?? null,
           codigoOferta: offerCode ?? null,
+          priceSource: priceInfo.priceSource,
+          priceListName: priceInfo.priceListName,
+          priceListCode: priceInfo.priceListCode,
           codigoProveedor: codigoProveedor ?? null,
           nombreProveedor: nombreProveedor ?? null,
           codigoLinea: codigoLinea ?? null,
@@ -1676,7 +1777,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
               className="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow"
               aria-busy={isSaving}
             >
-              {isSaving ? "Guardando..." : `Confirmar · Q${total.toFixed(2)}`}
+              {isSaving ? "Guardando..." : `Confirmar · ${formatCurrencyQ(total)}`}
             </Button>
           </div>
         </div>
@@ -1874,8 +1975,8 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                           <div className="col-span-2 font-mono text-xs">{comboCode}</div>
                           <div className="col-span-5 font-semibold">{comboName}</div>
                           <div className="col-span-1 text-center">{quantity}</div>
-                          <div className="col-span-2 text-right">Q{unitPrice.toFixed(2)}</div>
-                          <div className="col-span-2 text-right font-semibold">Q{group.totalPrice.toFixed(2)}</div>
+                          <div className="col-span-2 text-right">{formatCurrencyQ(unitPrice)}</div>
+                          <div className="col-span-2 text-right font-semibold">{formatCurrencyQ(group.totalPrice)}</div>
                         </div>
                         <div className="mt-3 flex justify-end gap-2">
                           <Button
@@ -1948,7 +2049,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                             <span>{it.descripcion}</span>
                           </div>
                           <div className={`text-xs ${isNegotiated ? "text-emerald-700 font-semibold" : "text-muted-foreground"}`}>
-                            Precio: Q{it.precioUnitario.toFixed(2)}
+                            Precio: {formatCurrencyQ(it.precioUnitario)}
                           </div>
                           {isNegotiated && it.priceListName && (
                             <div className="text-[11px] text-emerald-600">
@@ -1956,9 +2057,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                             </div>
                           )}
                           <div className={`text-[11px] ${isNegotiated ? "text-emerald-600" : "text-muted-foreground"}`}>
-                            Bruto: Q{(it.subtotalSinDescuento ?? it.cantidad * it.precioUnitario).toFixed(2)}
-                            {it.descuentoLinea ? ` · Desc: Q${it.descuentoLinea.toFixed(2)}` : ""}
-                            {it.descuentoLinea ? ` · Neto: Q${(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}` : ""}
+                            Bruto: {formatCurrencyQ(it.subtotalSinDescuento ?? it.cantidad * it.precioUnitario)}
+                            {it.descuentoLinea ? ` · Desc: ${formatCurrencyQ(it.descuentoLinea)}` : ""}
+                            {it.descuentoLinea ? ` · Neto: ${formatCurrencyQ(it.subtotal ?? it.cantidad * it.precioUnitario)}` : ""}
                           </div>
                         </div>
                         <div className="col-span-4 flex items-center gap-1">
@@ -2029,7 +2130,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                           )}
                         </div>
                         <div className="col-span-2 text-right font-semibold text-yellow-800 dark:text-yellow-200">
-                          Q{(it.subtotal ?? it.cantidad * it.precioUnitario).toFixed(2)}
+                          {formatCurrencyQ(it.subtotal ?? it.cantidad * it.precioUnitario)}
                         </div>
                         <div className="col-span-1 text-right flex justify-end">
                           {isBonus ? (
@@ -2244,13 +2345,13 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                                   </Badge>
                                   <div className="flex flex-col">
                                     <span className="font-semibold text-foreground">{comboName}</span>
-                                    <span className="text-[11px] font-mono text-muted-foreground">{comboCode} · Q{unitPrice.toFixed(2)}</span>
+                                    <span className="text-[11px] font-mono text-muted-foreground">{comboCode} · {formatCurrencyQ(unitPrice)}</span>
                                   </div>
                                 </div>
                                 <div className="col-span-1 text-right text-muted-foreground">Cant: {quantity}</div>
-                                <div className="col-span-2 text-right text-muted-foreground">Bruto: Q{gross.toFixed(2)}</div>
-                                <div className="col-span-2 text-right text-muted-foreground">Desc: Q{discount.toFixed(2)}</div>
-                                <div className="col-span-2 text-right font-semibold text-foreground">Q{net.toFixed(2)}</div>
+                                <div className="col-span-2 text-right text-muted-foreground">Bruto: {formatCurrencyQ(gross)}</div>
+                                <div className="col-span-2 text-right text-muted-foreground">Desc: {formatCurrencyQ(discount)}</div>
+                                <div className="col-span-2 text-right font-semibold text-foreground">{formatCurrencyQ(net)}</div>
                               </div>
                               {group.items.map((line) => {
                                 const detailCode = pickReferenceCode(
@@ -2312,9 +2413,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                                 <span className="font-xs">{it.descripcion}</span>
                               </div>
                               <div className="col-span-1 text-right text-muted-foreground">Cant: {it.cantidad}</div>
-                              <div className="col-span-2 text-right text-muted-foreground">Bruto: Q{bruto.toFixed(2)}</div>
-                              <div className="col-span-2 text-right text-muted-foreground">Desc: Q{descuento.toFixed(2)}</div>
-                              <div className="col-span-2 text-right font-semibold text-foreground">Q{neto.toFixed(2)}</div>
+                              <div className="col-span-2 text-right text-muted-foreground">Bruto: {formatCurrencyQ(bruto)}</div>
+                              <div className="col-span-2 text-right text-muted-foreground">Desc: {formatCurrencyQ(descuento)}</div>
+                              <div className="col-span-2 text-right font-semibold text-foreground">{formatCurrencyQ(neto)}</div>
                             </div>
                           );
                         })}
@@ -2322,14 +2423,14 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                     </div>
                   )}
                   <div className="text-right text-sm text-muted-foreground space-y-1">
-                    <div>Subtotal sin descuento: Q{itemsGross.toFixed(2)}</div>
-                    <div>Bonificación: Q{bonusValue.toFixed(2)}</div>
-                    <div>Descuento por ofertas: Q{offersDiscount.toFixed(2)}</div>
-                    <div>Subtotal neto (tras ofertas): Q{itemsTotal.toFixed(2)}</div>
-                    <div>Descuento general: Q{generalDiscountAmount.toFixed(2)}</div>
+                    <div>Subtotal sin descuento: {formatCurrencyQ(itemsGross)}</div>
+                    <div>Bonificación: {formatCurrencyQ(bonusValue)}</div>
+                    <div>Descuento por ofertas: {formatCurrencyQ(offersDiscount)}</div>
+                    <div>Subtotal neto (tras ofertas): {formatCurrencyQ(itemsTotal)}</div>
+                    <div>Descuento general: {formatCurrencyQ(generalDiscountAmount)}</div>
                   </div>
                   <div className="text-right text-lg font-semibold text-blue-700 dark:text-blue-300">
-                    Total: Q{total.toFixed(2)}
+                    Total: {formatCurrencyQ(total)}
                   </div>
                 </div>
               )}
@@ -2471,7 +2572,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                                 )}
                               </div>
                               <div className="text-right">
-                                <div className="text-sm font-semibold text-amber-700">Q{(pack.price ?? pack.packConfig.precioFijo).toFixed(2)}</div>
+                                <div className="text-sm font-semibold text-amber-700">{formatCurrencyQ(pack.price ?? pack.packConfig.precioFijo)}</div>
                                 <div className="text-xs text-muted-foreground">Precio fijo por pack</div>
                               </div>
                             </div>
@@ -2539,7 +2640,7 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                               </div>
                             ) : (
                               <div className="text-sm mt-1 text-emerald-700">
-                                Descuento aplicable ahora: Q{(app.potentialDiscount || 0).toFixed(2)}
+                                Descuento aplicable ahora: {formatCurrencyQ(app.potentialDiscount || 0)}
                               </div>
                             )}
                             {!isBonus && tiers.length > 0 && (
@@ -2833,7 +2934,8 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                   const qty = Math.min(Number(qtyRaw || 0), Math.max(remaining, 0));
                   if (!qty) return;
                   const prod = productosAll.find((p) => String(p.codigoProducto) === String(pid));
-                  const price = prod?.precio ?? 0;
+                  const priceInfo = resolveBonusUnitPrice(String(pid), prod);
+                  const price = priceInfo.price;
                   const bruto = Math.round(price * qty * 100) / 100;
                   const codigoProveedor = prod?.codigoProveedor != null ? String(prod.codigoProveedor) : undefined;
                   const nombreProveedor = prod?.proveedor ?? undefined;
@@ -2873,6 +2975,9 @@ export default function OrderFormFull({ onClose, draft, open }: { onClose: () =>
                     tipoOferta: "bonus",
                     ofertaCodigo: offerCode ?? null,
                     codigoOferta: offerCode ?? null,
+                    priceSource: priceInfo.priceSource,
+                    priceListName: priceInfo.priceListName,
+                    priceListCode: priceInfo.priceListCode,
                     codigoProveedor: codigoProveedor ?? null,
                     nombreProveedor: nombreProveedor ?? null,
                     codigoLinea: codigoLinea ?? null,

@@ -38,7 +38,9 @@ const ROLE_DEFAULT_PERMS: Record<string, Array<[PermissionModule, PermissionActi
   VENDEDOR: [
     ["products","read"],
     ["orders","create"],["orders","read"],
-    ["customers","read"]
+    ["customers","read"],
+    ["settings","read"],
+    ["sync","read"]
   ],
 };
 

@@ -99,6 +99,7 @@ export function getApplicableOffers(
     return [];
   }
   const todayDate = new Date();
+  todayDate.setHours(0, 0, 0, 0); // comparar solo por fecha, sin desfases de huso horario
   const applicableOffers: ApplicableOffer[] = [];
 
   console.log('🔍 Analizando ofertas para:', {
@@ -153,28 +154,39 @@ export function getApplicableOffers(
     // Normalizar y comparar fechas robustamente (soportar dd/mm/yyyy y yyyy-mm-dd)
     const parseDate = (s: string | undefined) => {
       if (!s) return null;
-      // yyyy-mm-dd or ISO
-      const iso = new Date(s);
-      if (!isNaN(iso.getTime())) return iso;
-      // try dd/mm/yyyy
-      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (m) {
-        const d = Number(m[1]);
-        const mo = Number(m[2]) - 1;
-        const y = Number(m[3]);
+      const trimmed = s.trim();
+      // yyyy-mm-dd → fecha local (evita adelantar un día por UTC)
+      const ymd = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (ymd) {
+        const y = Number(ymd[1]);
+        const mo = Number(ymd[2]) - 1;
+        const d = Number(ymd[3]);
         return new Date(y, mo, d);
       }
+      // dd/mm/yyyy
+      const dmy = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (dmy) {
+        const d = Number(dmy[1]);
+        const mo = Number(dmy[2]) - 1;
+        const y = Number(dmy[3]);
+        return new Date(y, mo, d);
+      }
+      // fallback ISO con hora
+      const iso = new Date(trimmed);
+      if (!isNaN(iso.getTime())) return iso;
       return null;
     };
 
     const vf = parseDate(offerToUse.dates?.validFrom);
     const vt = parseDate(offerToUse.dates?.validTo);
     let dateOk = true;
-    if (vf && vt) {
-      if (todayDate < vf || todayDate > vt) {
-        reasons.push(`date-out:${vf?.toISOString()}->${vt?.toISOString()}`);
-        dateOk = false;
-      }
+    if (vf && todayDate < vf) {
+      reasons.push(`date-before-start:${vf?.toISOString()}`);
+      dateOk = false;
+    }
+    if (vt && todayDate > vt) {
+      reasons.push(`date-after-end:${vt?.toISOString()}`);
+      dateOk = false;
     }
     const empresaMatch = !offerToUse.codigoEmpresa || !order.codigoEmpresa
       ? true

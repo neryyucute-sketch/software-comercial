@@ -376,7 +376,7 @@ export interface AuthUser {
 
 export type PermissionAction = "create" | "read" | "update" | "delete" | "cancel"
 export type PermissionModule =
-  | "products" | "orders" | "customers" | "offers" | "prices"
+  | "products" | "orders" | "customers" | "offers" | "prices"| "settings"| "sync"
   | "stats" | "users" | "vendors" | "vendor_classifications"
 
 export interface VendorClassification {
@@ -420,7 +420,6 @@ export interface PriceListRow {
   tier?: number;
   scope?: any;
   version?: number;
-  serverId?: string
   deleted?: boolean;
   dirty?: boolean;
   serverId?: string;

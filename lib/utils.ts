@@ -82,3 +82,15 @@ export function pickReferenceCode(...values: unknown[]): string | undefined {
   }
   return undefined
 }
+
+const guatemalaCurrency = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+export function formatCurrencyQ(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "Q.0.00"
+  const num = Number(value)
+  if (!Number.isFinite(num)) return "Q.0.00"
+  return `Q.${guatemalaCurrency.format(num)}`
+}

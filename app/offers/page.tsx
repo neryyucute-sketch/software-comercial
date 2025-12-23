@@ -16,11 +16,23 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus, Pencil, Trash2, Loader2, Tag, Calendar, Building2, Gift, Package, Percent, BadgeDollarSign, ListChecks } from "lucide-react";
 import { getAccessToken } from "@/services/auth";
-import { cn } from "@/lib/utils";
+import { cn, formatCurrencyQ } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 
 const formatDate = (dateStr?: string) => {
   if (!dateStr) return "";
+  // Si es formato YYYY-MM-DD, mostrarlo tal cual en local
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const [y, m, d] = dateStr.split("-");
+    return `${d}/${m}/${y}`;
+  }
+  // Si es ISO con T, tomar solo la parte de fecha
+  if (/^\d{4}-\d{2}-\d{2}T/.test(dateStr)) {
+    const [datePart] = dateStr.split("T");
+    const [y, m, d] = datePart.split("-");
+    return `${d}/${m}/${y}`;
+  }
+  // Fallback: intentar parsear
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString("es-GT", { day: "2-digit", month: "2-digit", year: "numeric" });
@@ -48,18 +60,25 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }
 
 const dedupeOffers = (items: OfferDef[]): OfferDef[] => {
   const ordered = new Map<string, OfferDef>();
-  const fallbacks: OfferDef[] = [];
+
+  const buildKey = (offer: OfferDef): string => {
+    const uuid = (offer.serverId ?? offer.id ?? "").toString().trim();
+    if (uuid) return `UUID:${uuid}`;
+
+    const code = (offer.codigoOferta ?? offer.referenceCode ?? "").toString().trim().toUpperCase();
+    const empresa = (offer.codigoEmpresa ?? "").toString().trim().toUpperCase();
+    if (code) return `CODE:${empresa}:${code}`;
+
+    const name = (offer.name ?? "").toString().trim();
+    if (name) return `NAME:${empresa}:${name}`;
+
+    return `TMP:${Math.random()}`;
+  };
 
   for (const offer of items) {
-    const rawKey = (offer.serverId ?? offer.id) ?? "";
-    const key = typeof rawKey === "string" ? rawKey.trim() : rawKey.toString();
-
-    if (!key) {
-      fallbacks.push(offer);
-      continue;
-    }
-
+    const key = buildKey(offer);
     const existing = ordered.get(key);
+
     if (!existing) {
       ordered.set(key, offer);
       continue;
@@ -67,12 +86,15 @@ const dedupeOffers = (items: OfferDef[]): OfferDef[] => {
 
     const existingUpdated = Date.parse(existing.updatedAt ?? "");
     const currentUpdated = Date.parse(offer.updatedAt ?? "");
-    if (Number.isNaN(existingUpdated) || (!Number.isNaN(currentUpdated) && currentUpdated >= existingUpdated)) {
+    const existingTs = Number.isNaN(existingUpdated) ? 0 : existingUpdated;
+    const currentTs = Number.isNaN(currentUpdated) ? 0 : currentUpdated;
+
+    if (currentTs >= existingTs) {
       ordered.set(key, offer);
     }
   }
 
-  return [...ordered.values(), ...fallbacks];
+  return [...ordered.values()];
 };
 
 export default function OffersPage() {
@@ -289,7 +311,22 @@ async function cargarCatalogos() {
       await cargarOfertas();
     } catch (error: any) {
       console.error("Error guardando oferta:", error);
-      alert(`Error guardando oferta: ${error.message}`);
+      // Mostrar error con fondo amarillo y texto negro para mejor visibilidad
+      const errorDiv = document.createElement('div');
+      errorDiv.style.position = 'fixed';
+      errorDiv.style.bottom = '32px';
+      errorDiv.style.right = '32px';
+      errorDiv.style.zIndex = '9999';
+      errorDiv.style.background = '#fffbe6';
+      errorDiv.style.color = '#222';
+      errorDiv.style.border = '2px solid #ffe58f';
+      errorDiv.style.borderRadius = '8px';
+      errorDiv.style.padding = '18px 28px';
+      errorDiv.style.fontSize = '1.1rem';
+      errorDiv.style.boxShadow = '0 2px 12px rgba(0,0,0,0.12)';
+      errorDiv.textContent = `Error guardando oferta: ${error.message}`;
+      document.body.appendChild(errorDiv);
+      setTimeout(() => errorDiv.remove(), 9000);
     }
   }
 
@@ -514,6 +551,12 @@ async function cargarCatalogos() {
                   pricelist: <ListChecks className="h-4 w-4 mr-1" />,
                 }[oferta.type] || <Tag className="h-4 w-4 mr-1" />;
 
+                 // Calcular el total bruto del pedido (sin descuento)
+                 // Suponiendo que oferta tiene un array 'items' con { cantidad, precioUnitario }
+                 // Si no existe, mostrar 0
+                 const totalBruto = Array.isArray(oferta.items)
+                   ? oferta.items.reduce((sum, item) => sum + (item.cantidad * item.precioUnitario), 0)
+                   : 0;
                 return (
                   <div
                     key={oferta.id}
@@ -561,6 +604,12 @@ async function cargarCatalogos() {
                       )}
 
                       {/* Badges de información */}
+                       {/* Total bruto del pedido */}
+                       <div className="flex items-center justify-end mt-2">
+                         <span className="text-2xl font-bold text-blue-700" style={{ letterSpacing: "1px" }}>
+                           {formatCurrencyQ(totalBruto)}
+                         </span>
+                       </div>
                       <div className="flex flex-wrap gap-2">
                         <span className={cn(
                           "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border",

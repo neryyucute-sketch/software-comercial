@@ -22,9 +22,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     if (savedTheme) {
       setTheme(savedTheme)
     } else {
-      // Detectar preferencia del sistema
-      const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-      setTheme(systemTheme)
+      // Por default, siempre modo claro para nuevos usuarios
+      setTheme("light")
     }
   }, [])
 

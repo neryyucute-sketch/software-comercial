@@ -141,6 +141,8 @@ export function OfferTabProducts({
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkError, setBulkError] = useState<string | null>(null);
+  const [productosMap, setProductosMap] = useState<Map<string, any>>(new Map());
+  const [localCacheMap, setLocalCacheMap] = useState<Map<string, any>>(new Map());
 
   const bulkParse = useMemo(() => parseBulkPriceInput(bulkText), [bulkText]);
 
@@ -158,6 +160,80 @@ export function OfferTabProducts({
       setBulkError(null);
     }
   }, [bulkModalOpen]);
+
+  useEffect(() => {
+    if (!bulkModalOpen) return;
+    (async () => {
+      try {
+        const { getCachedProducts } = await import("@/services/products");
+        const cache = await getCachedProducts();
+        setLocalCacheMap(
+          new Map(cache.map((p: any) => [p.codigoProducto ?? p.codigo, p]))
+        );
+      } catch {
+        setLocalCacheMap(new Map());
+      }
+    })();
+  }, [bulkModalOpen]);
+
+  // Prefetch descripciones desde backend para los SKUs pegados que no estén en cache
+  useEffect(() => {
+    if (!bulkModalOpen) return;
+    const codes = bulkParse.entries.map((e) => e.productId.trim()).filter(Boolean);
+    const missing = codes.filter((code) =>
+      !productosMap.has(code) && !localCacheMap.has(code)
+    );
+    if (!missing.length) return;
+
+    let cancelled = false;
+    const fetchMissing = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:10931/preventa/api/v1";
+        const token = await getAccessToken();
+        const headers: HeadersInit = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        };
+
+        const requests = missing.slice(0, 20).map(async (code) => {
+          const url = `${API_BASE}/catalogo-productos?q=${encodeURIComponent(code)}&page=0&size=1`;
+          const res = await fetch(url, { headers });
+          if (!res.ok) return null;
+          const data = await res.json();
+          const item = data?.content?.[0];
+          if (!item) return null;
+          const codigo = item.codigoProducto ?? item.codigo;
+          return codigo ? { codigo, item } : null;
+        });
+
+        const results = await Promise.all(requests);
+        if (cancelled) return;
+
+        setLocalCacheMap((prev) => {
+          const next = new Map(prev);
+          results.forEach((r) => {
+            if (r) next.set(r.codigo, r.item);
+          });
+          return next;
+        });
+
+        setProductosMap((prev) => {
+          const next = new Map(prev);
+          results.forEach((r) => {
+            if (r && !next.has(r.codigo)) next.set(r.codigo, r.item);
+          });
+          return next;
+        });
+      } catch (err) {
+        // Silencioso para no bloquear UI
+      }
+    };
+
+    fetchMissing();
+    return () => {
+      cancelled = true;
+    };
+  }, [bulkModalOpen, bulkParse.entries, productosMap, localCacheMap]);
 
   const ensurePack = (pack?: PackState): PackState => ({
     precioFijo: pack?.precioFijo ?? 0,
@@ -248,8 +324,7 @@ export function OfferTabProducts({
   const [page, setPage] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const observerTarget = useRef<HTMLDivElement>(null);
-  
-  const [productosMap, setProductosMap] = useState<Map<string, any>>(new Map());
+
   const priceListProducts = draft.priceList?.products ?? [];
   const codigosProductoSeleccionados: string[] = isPriceListOffer
     ? priceListProducts.map((item) => item.productId)
@@ -546,7 +621,7 @@ export function OfferTabProducts({
     });
   };
 
-  const handleApplyBulkPrices = () => {
+  const handleApplyBulkPrices = async () => {
     const parsed = parseBulkPriceInput(bulkText);
     if (!parsed.entries.length) {
       setBulkError(parsed.errors[0] ?? "No se detectaron pares SKU, precio.");
@@ -559,8 +634,20 @@ export function OfferTabProducts({
 
     setBulkError(null);
 
+    // Fallback a cache local para obtener descripción/basePrice cuando vienen por pegado
+    let localCache: any[] = [];
+    let localMap = new Map<string, any>();
+    try {
+      const { getCachedProducts } = await import("@/services/products");
+      localCache = await getCachedProducts();
+      localMap = new Map(
+        localCache.map((p: any) => [p.codigoProducto ?? p.codigo, p])
+      );
+    } catch {}
+
     let createdCount = 0;
     let updatedCount = 0;
+    const toRemember: Array<{ code: string; info: any }> = [];
 
     update((d) => {
       const currentList = d.priceList?.products ?? [];
@@ -586,7 +673,12 @@ export function OfferTabProducts({
           if (!duplicate) {
             localCreated += 1;
           }
-          const productInfo = productosMap.get(key);
+          const productInfo = productosMap.get(key) ?? localCacheMap.get(key) ?? localMap.get(key);
+          if (productInfo) {
+            toRemember.push({ code: key, info: productInfo });
+          } else {
+            toRemember.push({ code: key, info: { codigoProducto: key, descripcion: key } });
+          }
           map.set(key, {
             productId: key,
             price: entry.price,
@@ -614,6 +706,19 @@ export function OfferTabProducts({
 
     setBulkModalOpen(false);
     setBulkText("");
+
+    // Asegura que productosMap tenga la descripción/base para los pegados
+    if (toRemember.length) {
+      setProductosMap((prev) => {
+        const next = new Map(prev);
+        toRemember.forEach(({ code, info }) => {
+          if (!next.has(code)) {
+            next.set(code, info ?? { codigoProducto: code, descripcion: code });
+          }
+        });
+        return next;
+      });
+    }
 
     toast({
       title: "Lista negociada actualizada",
@@ -1121,6 +1226,15 @@ export function OfferTabProducts({
   if (isPriceListOffer) {
     const bulkDerivedError = bulkError ?? bulkParse.errors[0] ?? null;
     const previewEntries = bulkParse.entries.slice(0, 5);
+    const describe = (code: string) => {
+      const p = productosMap.get(code) ?? localCacheMap.get(code);
+      const desc = p?.descripcion ?? p?.nombre ?? p?.description;
+      if (!desc) return undefined;
+      const trimmedDesc = String(desc).trim();
+      if (!trimmedDesc) return undefined;
+      if (trimmedDesc === String(code).trim()) return undefined;
+      return trimmedDesc;
+    };
     const previewCount = bulkParse.entries.length;
 
     return (
@@ -1330,11 +1444,15 @@ export function OfferTabProducts({
                       : `Se detectaron ${previewCount} productos listos para importar.`}
                     {previewEntries.length > 0 && (
                       <ul className="mt-2 space-y-1 text-emerald-800">
-                        {previewEntries.map((entry) => (
-                          <li key={entry.productId} className="font-mono text-[11px]">
-                            {entry.productId} → {entry.price.toFixed(2)}
-                          </li>
-                        ))}
+                        {previewEntries.map((entry) => {
+                          const desc = describe(entry.productId);
+                          return (
+                            <li key={entry.productId} className="font-mono text-[11px]">
+                              {entry.productId}
+                              {desc ? ` — ${desc}` : ""} → {entry.price.toFixed(2)}
+                            </li>
+                          );
+                        })}
                         {previewCount > previewEntries.length && (
                           <li className="text-[11px] text-emerald-600">
                             … y {previewCount - previewEntries.length} más
@@ -1355,7 +1473,9 @@ export function OfferTabProducts({
                 Cancelar
               </Button>
               <Button
-                onClick={handleApplyBulkPrices}
+                onClick={async () => {
+                  await handleApplyBulkPrices();
+                }}
                 disabled={!bulkText.trim() || Boolean(bulkDerivedError)}
               >
                 Aplicar cambios

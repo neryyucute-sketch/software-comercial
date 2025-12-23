@@ -34,9 +34,9 @@ const mainNavigation = [
 const adminNavigation = [
   { name: "Ofertas y Promociones", href: "/offers", icon: Tag, roles: ["admin", "manager"] },
   { name: "Vendedores", href: "/vendors", icon: Truck, roles: ["admin", "manager"] },
-  { name: "Estadísticas", href: "/stats", icon: BarChart3, roles: ["admin", "manager", "vendedor"] },
-  { name: "Sincronizar", href: "/sync", icon: RefreshCw, roles: ["admin", "manager", "vendedor"] },
-  { name: "Configuración", href: "/settings", icon: Settings, roles: ["admin", "manager"] },
+  { name: "Estadísticas", href: "/stats", icon: BarChart3, roles: ["admin", "manager", "VENDEDOR"] },
+  { name: "Sincronizar", href: "/sync", icon: RefreshCw, roles: ["admin", "manager", "VENDEDOR"] },
+  { name: "Configuración", href: "/settings", icon: Settings, roles: ["admin", "manager", "VENDEDOR"] },
 ]
 
 export function Navigation() {

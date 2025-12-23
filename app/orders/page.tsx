@@ -12,8 +12,8 @@ import type { Order } from "@/lib/types";
 import OrderModal from "@/components/order/OrderModal";
 import { PDFDownloadLink } from "@react-pdf/renderer";
 import OrderPdf from "@/components/order/OrderPdf";
-import { groupOrderComboItems, resolveComboGroupQuantity, resolveComboGroupUnitPrice, type OrderComboGroup } from "@/lib/order-helpers";
-import { pickReferenceCode } from "@/lib/utils";
+import { groupOrderComboItems, type OrderComboGroup } from "@/lib/order-helpers";
+import { formatCurrencyQ } from "@/lib/utils";
 
 export default function OrdersPage() {
     // Estados para mostrar/ocultar paneles en móvil
@@ -71,14 +71,56 @@ export default function OrdersPage() {
       | { type: "single"; item: OrderItem; idx: number }
       | { type: "combo-parent"; group: OrderComboGroup }
       | { type: "combo-child"; group: OrderComboGroup; item: OrderItem; idx: number }
+      | { type: "bonus-child"; parentId: string; item: OrderItem; idx: number }
     >;
+
     const rows: Array<
       | { type: "single"; item: OrderItem; idx: number }
       | { type: "combo-parent"; group: OrderComboGroup }
       | { type: "combo-child"; group: OrderComboGroup; item: OrderItem; idx: number }
+      | { type: "bonus-child"; parentId: string; item: OrderItem; idx: number }
     > = [];
+
+    const byId = new Map<string, OrderItem>();
+    viewingSortedItems.forEach((item) => {
+      if (item.id) byId.set(String(item.id), item);
+    });
+
+    const bonusByParent = new Map<string, OrderItem[]>();
+    const unlinkedBonuses: OrderItem[] = [];
+
+    viewingSortedItems.forEach((item) => {
+      if (!item.esBonificacion) return;
+      const parentCandidates = [item.parentItemId, ...(item.relatedItemIds ?? [])].filter(Boolean).map(String);
+      const parentId = parentCandidates.find((candidate) => byId.has(candidate ?? ""));
+      if (parentId) {
+        const list = bonusByParent.get(parentId) ?? [];
+        list.push(item);
+        bonusByParent.set(parentId, list);
+      } else {
+        unlinkedBonuses.push(item);
+      }
+    });
+
+    const sortBonuses = (entries?: OrderItem[]) =>
+      entries
+        ?.slice()
+        .sort((a, b) => {
+          const aNum = a?.lineNumber ?? Number.POSITIVE_INFINITY;
+          const bNum = b?.lineNumber ?? Number.POSITIVE_INFINITY;
+          if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+          if (Number.isFinite(aNum)) return -1;
+          if (Number.isFinite(bNum)) return 1;
+          return String(a.descripcion || "").localeCompare(String(b.descripcion || ""));
+        }) ?? [];
+
     const seenGroups = new Set<string>();
+
     viewingSortedItems.forEach((item, idx) => {
+      if (item.esBonificacion) {
+        return;
+      }
+
       const group = viewingComboData.byItem.get(item);
       if (group) {
         if (seenGroups.has(group.key)) {
@@ -86,15 +128,42 @@ export default function OrdersPage() {
         }
         seenGroups.add(group.key);
         rows.push({ type: "combo-parent", group });
+        const groupedBonuses: Array<{ parentId: string; item: OrderItem }> = [];
         group.items.forEach((child, childIdx) => {
           rows.push({ type: "combo-child", group, item: child, idx: childIdx });
+          const bonuses = sortBonuses(bonusByParent.get(child.id ? String(child.id) : ""));
+          bonuses.forEach((bonus) => {
+            groupedBonuses.push({ parentId: child.id ? String(child.id) : "", item: bonus });
+          });
+        });
+        groupedBonuses.forEach((entry, bonusIdx) => {
+          rows.push({ type: "bonus-child", parentId: entry.parentId, item: entry.item, idx: bonusIdx });
         });
         return;
       }
+
       rows.push({ type: "single", item, idx });
+      const bonuses = sortBonuses(bonusByParent.get(item.id ? String(item.id) : ""));
+      bonuses.forEach((bonus, bonusIdx) => {
+        rows.push({ type: "bonus-child", parentId: item.id ? String(item.id) : "", item: bonus, idx: bonusIdx });
+      });
     });
+
+    sortBonuses(unlinkedBonuses).forEach((bonus, bonusIdx) => {
+      rows.push({ type: "bonus-child", parentId: "", item: bonus, idx: bonusIdx });
+    });
+
     return rows;
   }, [viewingSortedItems, viewingComboData]);
+
+  const viewingTotals = useMemo(() => {
+    if (!viewing) return { gross: 0, discount: 0, net: 0 };
+    const lines = Array.isArray(viewing.items) ? viewing.items : [];
+    const gross = lines.reduce((sum, line) => sum + (line.subtotalSinDescuento ?? line.subtotal ?? line.cantidad * line.precioUnitario), 0);
+    const net = lines.reduce((sum, line) => sum + (line.total ?? line.subtotal ?? line.cantidad * line.precioUnitario), 0);
+    const discount = Math.max(0, gross - net);
+    return { gross, discount, net };
+  }, [viewing]);
 
   // Lógica de filtrado, orden y paginación
   const filteredOrders = useMemo(() => {
@@ -269,7 +338,7 @@ export default function OrdersPage() {
               const nombre = o.nombreCliente || o.codigoCliente || (o as any).customerId || "(sin cliente)";
               const direccion = o.direccionEntrega || o.municipio || o.departamento || "Sin dirección";
               const itemsLabel = `${o.items?.length || 0} ítem${(o.items?.length || 0) === 1 ? "" : "s"}`;
-              const total = typeof o.total === "number" ? o.total.toFixed(2) : "0.00";
+              const totalLabel = formatCurrencyQ(o.subtotalSinDescuento ?? o.total ?? 0);
               const fecha = formatDate(o.fecha || o.createdAt);
               const editable = canEdit(o);
               return (
@@ -284,7 +353,7 @@ export default function OrdersPage() {
                     </div>
                     <div className="flex flex-col gap-2 text-right min-w-[180px]">
                       <div className="text-sm text-blue-400">{itemsLabel}</div>
-                      <div className="text-lg font-bold text-blue-700 dark:text-blue-200">Q{total}</div>
+                      <div className="text-lg font-bold text-blue-700 dark:text-blue-200">{totalLabel}</div>
                       {renderStatus(o)}
                     </div>
                   </div>
@@ -354,7 +423,7 @@ export default function OrdersPage() {
                 </span>
                 <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 dark:bg-blue-900 px-3 py-1 font-medium text-blue-800 dark:text-blue-200">
                   <span className="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
-                  Total estimado: Q{draft?.total?.toFixed(2) || "0.00"}
+                  Total estimado: {formatCurrencyQ(draft?.total ?? 0)}
                 </span>
               </div>
             </div>
@@ -401,9 +470,9 @@ export default function OrdersPage() {
               </div>
               <div>
                 <div className="text-xs text-blue-400">Totales</div>
-                <div>Subtotal: Q{(viewing.subtotal ?? 0).toFixed(2)}</div>
-                <div>Descuento: Q{(viewing.descuentoTotal ?? 0).toFixed(2)}</div>
-                <div className="font-semibold text-blue-700 dark:text-blue-200">Total: Q{(viewing.total ?? 0).toFixed(2)}</div>
+                <div>Subtotal: {formatCurrencyQ(viewingTotals.gross)}</div>
+                <div>Descuento: {formatCurrencyQ(viewingTotals.discount)}</div>
+                <div className="font-semibold text-blue-700 dark:text-blue-200">Total: {formatCurrencyQ(viewingTotals.net)}</div>
               </div>
               <div>
                 <div className="text-xs text-blue-400">Estado</div>
@@ -417,68 +486,50 @@ export default function OrdersPage() {
               )}
               {viewingRows.length > 0 && (
                 <div className="md:col-span-2 space-y-2">
-                  <div className="text-xs text-blue-400 font-semibold">Productos</div>
-                  <div className="rounded-lg border border-blue-100 dark:border-blue-900 divide-y divide-blue-100 dark:divide-blue-900 overflow-hidden">
-                    {viewingRows.map((row, idx) => {
-                      if (row.type === "single") {
-                        const bruto = row.item.subtotalSinDescuento ?? row.item.subtotal ?? row.item.cantidad * row.item.precioUnitario;
-                        const desc = row.item.descuentoLinea ?? 0;
-                        const neto = row.item.subtotal ?? bruto;
-                        return (
-                          <div key={row.item.id || `single-${idx}`} className="grid grid-cols-12 gap-2 px-3 py-2 text-sm">
-                            <div className="col-span-5 font-medium text-blue-700 dark:text-blue-200 truncate">{row.item.descripcion}</div>
-                            <div className="col-span-2 text-right text-blue-400">Cant: {row.item.cantidad}</div>
-                            <div className="col-span-2 text-right text-blue-400">Bruto: Q{bruto.toFixed(2)}</div>
-                            <div className="col-span-2 text-right text-blue-400">Desc: Q{desc.toFixed(2)}</div>
-                            <div className="col-span-1 text-right font-semibold text-blue-700 dark:text-blue-200">Q{neto.toFixed(2)}</div>
-                          </div>
-                        );
-                      }
-
-                      if (row.type === "combo-parent") {
-                        const comboGross = row.group.items.reduce((sum, line) => {
-                          const lineGross = line.subtotalSinDescuento ?? line.subtotal ?? line.cantidad * line.precioUnitario;
-                          return sum + lineGross;
-                        }, 0);
-                        const comboNet = row.group.totalPrice;
-                        const comboDiscount = comboGross - comboNet;
-                        const groupQuantity = resolveComboGroupQuantity(row.group);
-                        const groupUnitPrice = resolveComboGroupUnitPrice(row.group);
-                        const displayCode = pickReferenceCode(
-                          row.group.offerCode,
-                          row.group.comboCode,
-                          row.group.items[0]?.ofertaCodigo,
-                          row.group.items[0]?.comboCode
-                        ) ?? "-";
-                        return (
-                          <div key={`combo-${row.group.key}`} className="grid grid-cols-12 gap-2 px-3 py-3 text-sm bg-blue-50/70 dark:bg-blue-950/40">
-                            <div className="col-span-5 flex flex-col gap-1">
-                              <div className="font-semibold text-blue-700 dark:text-blue-200 truncate">{row.group.comboName || displayCode || "Combo / Kit"}</div>
-                              <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase text-blue-400">
-                                <span>{row.group.comboType === "kit" ? "Kit" : "Combo"}</span>
-                                {displayCode !== "-" && <span className="tracking-wide">Código: {displayCode}</span>}
-                                <span>Unitario: Q{groupUnitPrice.toFixed(2)}</span>
+                    <div className="text-xs text-blue-400 font-semibold">Productos</div>
+                    <div className="rounded-lg border border-blue-100 dark:border-blue-900 overflow-hidden">
+                      <div className="grid grid-cols-[4fr_2fr_2fr_2fr_1fr_1fr_1fr] gap-2 px-3 py-2 text-xs font-semibold bg-blue-600 text-white">
+                        <div>Producto</div>
+                        <div className="text-right">Cantidad</div>
+                        <div className="text-right">Precio</div>
+                        <div className="text-right">Bruto</div>
+                        <div className="text-right">Desc Prod</div>
+                        <div className="text-right">Bonif</div>
+                        <div className="text-right">Total</div>
+                      </div>
+                      {viewingRows
+                        .filter((row) => row.type !== "combo-parent")
+                        .map((row, idx) => {
+                          const item = row.item;
+                          const bruto = item.subtotalSinDescuento ?? item.subtotal ?? item.cantidad * item.precioUnitario;
+                          const neto = item.total ?? item.subtotal ?? item.cantidad * item.precioUnitario;
+                          const descBase = item.descuentoLinea ?? Math.max(0, bruto - neto);
+                          const desc = descBase < 0.005 ? 0 : descBase;
+                          const qty = item.cantidad ?? 0;
+                          const fallbackUnit = qty > 0 ? bruto / qty : bruto;
+                          const unit = item.precioUnitario && item.precioUnitario > 0 ? item.precioUnitario : fallbackUnit;
+                          const isBonus = row.type === "bonus-child" || item.esBonificacion;
+                          const directDiscount = isBonus ? 0 : desc;
+                          const bonusDiscount = isBonus ? bruto : 0;
+                          return (
+                            <div
+                              key={item.id || `${row.type}-${idx}`}
+                              className={`grid grid-cols-[4fr_2fr_2fr_2fr_1fr_1fr_1fr] gap-2 px-3 py-2 text-sm ${
+                                isBonus ? "bg-blue-50/60 dark:bg-blue-950/40" : "bg-white dark:bg-neutral-900"
+                              } ${idx % 2 === 0 ? "" : "bg-blue-50/20 dark:bg-neutral-950/20"}`}
+                            >
+                              <div className={`truncate ${isBonus ? "italic text-blue-600 dark:text-blue-200" : "text-blue-700 dark:text-blue-100"}`}>
+                                {isBonus ? `Bonificación: ${item.descripcion}` : item.descripcion}
                               </div>
+                              <div className="text-right text-blue-500">{item.cantidad}</div>
+                              <div className="text-right text-blue-500">{formatCurrencyQ(unit)}</div>
+                              <div className="text-right text-blue-500">{formatCurrencyQ(bruto)}</div>
+                              <div className="text-right text-blue-500">{formatCurrencyQ(directDiscount)}</div>
+                              <div className="text-right text-blue-500">{formatCurrencyQ(bonusDiscount)}</div>
+                              <div className="text-right font-semibold text-blue-700 dark:text-blue-100">{formatCurrencyQ(neto)}</div>
                             </div>
-                            <div className="col-span-2 text-right text-blue-500">Cant: {groupQuantity}</div>
-                            <div className="col-span-2 text-right text-blue-500">Bruto: Q{comboGross.toFixed(2)}</div>
-                            <div className="col-span-2 text-right text-blue-500">Desc: Q{comboDiscount.toFixed(2)}</div>
-                            <div className="col-span-1 text-right font-semibold text-blue-700 dark:text-blue-200">Q{comboNet.toFixed(2)}</div>
-                          </div>
-                        );
-                      }
-
-                      const item = row.item;
-                      return (
-                        <div key={item.id || `combo-child-${row.group.key}-${row.idx}`} className="grid grid-cols-12 gap-2 px-3 py-2 text-xs bg-white dark:bg-neutral-900">
-                          <div className="col-span-5 pl-6 text-blue-500 dark:text-blue-200 truncate">{item.descripcion}</div>
-                          <div className="col-span-2 text-right text-blue-300">Cant: {item.cantidad}</div>
-                          <div className="col-span-2 text-right text-blue-300">—</div>
-                          <div className="col-span-2 text-right text-blue-300">—</div>
-                          <div className="col-span-1 text-right text-blue-300">—</div>
-                        </div>
-                      );
-                    })}
+                          );
+                        })}
                   </div>
                 </div>
               )}
