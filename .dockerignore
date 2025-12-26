@@ -5,5 +5,4 @@ node_modules
 pnpm-debug.log
 npm-debug.log
 .env
-.env.local
 .env.development
