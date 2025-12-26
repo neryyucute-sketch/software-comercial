@@ -43,7 +43,7 @@ export default function LoginForm() {
     const success = await login(username.trim(), password);
 
     if (success) {
-      router.push("/products"); // 👈 redirige si login OK
+      router.push("/"); // 👈 redirige si login OK
     } else {
       setError("Usuario o contraseña incorrectos");
     }
